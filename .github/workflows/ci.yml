@@ -19,7 +19,10 @@ permissions:
 # if pyproject.toml and uv.lock have drifted apart). The matrix covers the
 # declared floor (requires-python >=3.10) and the current stable release.
 # The integration tests and the mock smoke run need an MQTT broker: a throwaway
-# Mosquitto container on 127.0.0.1:1883 (the command from the README).
+# Mosquitto container on 127.0.0.1:1883 (the command from the README). The
+# lowest-direct job runs the suite against the lowest versions of the declared
+# direct dependencies, so the floors in pyproject.toml stay honest (the mock's
+# floors are the same paho-mqtt and protobuf, and the suite runs the mock).
 jobs:
   server:
     name: mqtt-python (MCP server) / Python ${{ matrix.python-version }}
@@ -102,7 +105,8 @@ jobs:
           docker run -d --name mqtt-broker -p 127.0.0.1:1883:1883 \
             eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
           for _ in $(seq 30); do
-            (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null && exit 0
+            docker exec mqtt-broker mosquitto_sub -h 127.0.0.1 -t '$SYS/broker/version' -C 1 -W 2 \
+              && exit 0
             sleep 1
           done
           docker logs mqtt-broker
@@ -116,6 +120,53 @@ jobs:
           MQTT_TEST_BROKER_URL: mqtt://127.0.0.1:1883
           MQTT_TEST_REQUIRE_BROKER: "1"
         run: uv run --locked pytest -v
+
+      - name: Broker log
+        if: failure()
+        run: docker logs mqtt-broker || true
+
+  lowest-direct:
+    name: mqtt-python, lowest direct dependencies / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    defaults:
+      run:
+        working-directory: mqtt-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the lowest declared versions of the direct dependencies
+        run: |
+          uv venv .venv-lowest
+          uv pip install --python .venv-lowest --resolution lowest-direct -e . --group dev
+          uv pip list --python .venv-lowest
+
+      - name: Start an MQTT broker (Mosquitto)
+        run: |
+          docker run -d --name mqtt-broker -p 127.0.0.1:1883:1883 \
+            eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          for _ in $(seq 30); do
+            docker exec mqtt-broker mosquitto_sub -h 127.0.0.1 -t '$SYS/broker/version' -C 1 -W 2 \
+              && exit 0
+            sleep 1
+          done
+          docker logs mqtt-broker
+          exit 1
+
+      - name: Tests (pytest)
+        env:
+          MQTT_TEST_BROKER_URL: mqtt://127.0.0.1:1883
+          MQTT_TEST_REQUIRE_BROKER: "1"
+        run: .venv-lowest/bin/python -m pytest -v
 
       - name: Broker log
         if: failure()
@@ -167,7 +218,8 @@ jobs:
           docker run -d --name mqtt-broker -p 127.0.0.1:1883:1883 \
             eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
           for _ in $(seq 30); do
-            (exec 3<>/dev/tcp/127.0.0.1/1883) 2>/dev/null && exit 0
+            docker exec mqtt-broker mosquitto_sub -h 127.0.0.1 -t '$SYS/broker/version' -C 1 -W 2 \
+              && exit 0
             sleep 1
           done
           docker logs mqtt-broker
