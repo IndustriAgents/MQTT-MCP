@@ -30,7 +30,7 @@ uv run mqtt-mcp
 
 The server then waits silently for an MCP client on stdin: it speaks MCP (JSON-RPC) on stdio and logs to stderr. Normally your MCP client starts it (see [Usage with Claude Desktop](#usage-with-claude-desktop)); to try it by hand, run `npx @modelcontextprotocol/inspector uv --directory mqtt-python run mqtt-mcp` from the repository root. `uv run mqtt-mcp --help` lists the settings and `--version` prints the version.
 
-A `.env` file in the working directory (or the nearest parent with one) is loaded at startup; variables already set in the environment take precedence. An invalid setting stops the server with a `configuration error` on stderr (exit code 2).
+At startup the server merges a `.env` file into the environment: the one given with `--env-file PATH`, or else the nearest `.env` in the working directory or a parent. Variables already set in the environment take precedence. An automatically found `.env` may set connection settings but not `MQTT_WRITES_ENABLED`: that is ignored with a warning on stderr, because the working directory is often the MCP client's project. Only the real environment or `--env-file` can enable writes. [`.env.example`](.env.example) lists every setting. An invalid setting stops the server with a `configuration error` on stderr (exit code 2).
 
 ## Configuration
 
@@ -44,7 +44,7 @@ Environment variables:
 - `MQTT_TLS_CA_FILE` - CA file for verifying the broker (`mqtts://` only; default: system trust store)
 - `MQTT_TLS_CERT_FILE` / `MQTT_TLS_KEY_FILE` / `MQTT_TLS_KEY_PASSWORD` - Client certificate for mutual TLS
 - `MQTT_TLS_INSECURE` - `true` disables certificate and hostname verification (testing only)
-- `MQTT_WRITES_ENABLED` - `true` enables the publishing tools (default: `false`)
+- `MQTT_WRITES_ENABLED` - `true` enables the publishing tools and `$`-prefixed subscription filters (default: `false`). Only from the real environment or `--env-file`
 - `MQTT_TOOL_TIMEOUT` - Seconds to wait for the connection and broker acknowledgements (default: `5`)
 - `MQTT_MESSAGE_BUFFER_SIZE` - Received messages kept for `read_messages` (default: `1000`)
 - `SPARKPLUG_GROUP_ID` - Sparkplug B group ID (default: `factory`)
@@ -52,7 +52,9 @@ Environment variables:
 
 ## Tools
 
-Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta": {...} }`. Invalid arguments come back as `success: false` with the reason.
+Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta": {...} }`. Invalid arguments come back as `success: false` with the reason; types are strict (`true` is not a number, `1` is not a boolean).
+
+Write tools add `meta.outcome` (`written`, `not_sent`, `unknown`; `rejected` never occurs with MQTT 3.1.1) and `meta.request_sent`. Each publish goes out at most once: a late or lost confirmation is reported as `unknown` ("may have been applied; check before retrying"), never retried, and withdrawn from the client's queue.
 
 ### Read-only tools
 
@@ -60,7 +62,7 @@ Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta":
 Broker URL, TLS, client ID, username, whether the server is connected and the last connection error, whether writes are enabled, subscriptions, number of buffered messages, and the state of this server's own Sparkplug edge node.
 
 #### `subscribe_topic`
-Subscribe to a topic filter. Succeeds only after the broker's SUBACK and reports the granted QoS. Subscriptions are restored after a reconnect. Shared subscriptions (`$share/`, `$queue/`) need writes enabled, because they divert messages from other consumers.
+Subscribe to a topic filter. Succeeds only after the broker's SUBACK and reports the granted QoS. Subscriptions are restored after a reconnect. Filters starting with `$` other than `$SYS/` (shared `$share/`, `$queue/`, exclusive `$exclusive/`) need writes enabled, because they change what other clients receive.
 
 **Parameters:**
 - `topic` (string, required) - Topic filter (supports `+`/`#` wildcards)
@@ -97,7 +99,7 @@ Decode a hex-encoded Sparkplug B payload: timestamp, seq, and metrics with name,
 Sparkplug metrics are lists of `{"name": str, "value": ..., "type": str}` where `type` is one of `int8`, `int16`, `int32` (or `int`), `int64` (or `long`), `uint8`, `uint16`, `uint32`, `uint64`, `float`, `double`, `boolean` (or `bool`), `string`, `text`, `uuid`, `datetime` (ms since the epoch) or `bytes` (hex). The value must match the type and its range; `null` sends a null metric. Anything else is rejected and nothing is sent.
 
 #### `publish_message`
-Publish UTF-8 text. Success means: QoS 0 written to the network; QoS 1/2 acknowledged by the broker.
+Publish UTF-8 text. Success means: QoS 0 written to the network; QoS 1/2 acknowledged by the broker (an MQTT 3.1.1 broker also acknowledges a publish its ACL drops).
 
 **Parameters:**
 - `topic` (string, required) - Topic name (no wildcards)
@@ -163,10 +165,10 @@ Add `"MQTT_WRITES_ENABLED": "true"` to `env` only if the agent may publish.
 
 - `mcp[cli]>=1.12,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, so the server needs 1.x)
 - `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
-- `protobuf>=4.24` - Protobuf runtime for the Sparkplug B schema
+- `protobuf>=5.27` - Protobuf runtime for the Sparkplug B schema
 - `python-dotenv>=1.0` - `.env` loading
 
-Sparkplug B payloads are encoded and decoded with `mqtt_mcp/sparkplug_b_pb2.py`, which provides the same classes as the `sparkplug_b_pb2` module protoc generates from `sparkplug_b.proto` but builds the descriptor at import time, so it works with any protobuf runtime from 4.24 on (protoc-generated code is tied to the protoc version that wrote it).
+Sparkplug B payloads are encoded and decoded with `mqtt_mcp/sparkplug_b_pb2.py`, which provides the same classes as the `sparkplug_b_pb2` module protoc generates from `sparkplug_b.proto` but builds the descriptor at import time, so it works with any protobuf runtime from 5.27 on (protoc-generated code is tied to the protoc version that wrote it).
 
 Development dependencies (`uv sync` installs them): `pytest`, `ruff`, and `cryptography` (test TLS certificates).
 
@@ -187,4 +189,9 @@ uv run ruff check . && uv run ruff format --check .
 uv run pytest                # unit tests; integration tests need a broker:
 MQTT_TEST_BROKER_URL=mqtt://127.0.0.1:1883 uv run pytest
 uv run mqtt-mcp              # run the server
+uv run mqtt-mcp --env-file ../plant.env   # settings (writes included) from an explicit file
+
+# the lowest declared dependency versions, as CI's lowest-direct job does
+uv venv /tmp/mqtt-lowest && uv pip install --python /tmp/mqtt-lowest --resolution lowest-direct -e . --group dev
+MQTT_TEST_BROKER_URL=mqtt://127.0.0.1:1883 /tmp/mqtt-lowest/bin/python -m pytest
 ```

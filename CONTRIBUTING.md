@@ -102,8 +102,16 @@ Each test uses its own topics and Sparkplug group, so a shared broker is fine.
 
 CI also byte-compiles the sources, imports each console-script target, runs
 `mqtt-mcp --help`, performs an MCP `initialize` and `tools/list` handshake
-without a broker, and runs the mock against Mosquitto for a few seconds. See
+without a broker, and runs the mock against Mosquitto for a few seconds. A
+`lowest-direct` job runs the suite with the lowest versions that
+`pyproject.toml` allows for the direct dependencies; if you lower a floor, or
+use a newer API of a dependency, check that job (the command is in
+[mqtt-python/README.md](mqtt-python/README.md#development)). See
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact steps.
+
+A safety test has to be able to fail: when you add one (write gate, input
+check, at-most-once publishing, clean stdout, ...), remove the protection it
+guards once and see the test go red before you commit.
 
 ## Testing a change
 
@@ -142,6 +150,13 @@ pull request and describe the bench you used.
   default). A new tool that publishes must do the same, and its description
   must start with `WRITE:`. Call out such tools in the pull request,
   especially Sparkplug `NCMD`/`DCMD` or retained messages.
+- The write gate is read only from the real environment or `--env-file`,
+  never from an automatically found `.env`.
+- A publish is sent at most once. Never retry one whose confirmation is late
+  or lost; report `meta.outcome: "unknown"` with `meta.request_sent: true`.
+  Only connecting may be retried.
+- Arguments are strictly typed (`StrictInt`, `StrictBool`): never accept a
+  boolean as a number.
 - Tool descriptions are what an agent plans with: keep them exact about what
   the tool does and does not do.
 - If you add a tool, make sure the mock can exercise it, or nobody can test it

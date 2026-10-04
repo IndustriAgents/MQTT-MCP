@@ -165,6 +165,6 @@ The mock:
 ## Dependencies
 
 - `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
-- `protobuf>=4.24` - Protobuf runtime for `sparkplug_b_pb2.py`
+- `protobuf>=5.27` - Protobuf runtime for `sparkplug_b_pb2.py`
 
 Development dependency: `ruff` (`uv sync` installs it).

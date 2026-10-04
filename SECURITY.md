@@ -19,8 +19,24 @@ supports:
   the server runs with `MQTT_WRITES_ENABLED=true`. All publishes are gated, not
   only commands: on MQTT any topic can be acted on by a subscriber, retained
   messages persist, and Sparkplug births and data change what host
-  applications show. Shared subscriptions (`$share/`, `$queue/`), which divert
-  messages from other consumers, are refused while writes are off.
+  applications show. Subscription filters that start with `$` (other than
+  `$SYS/`), such as shared (`$share/`, `$queue/`) and exclusive (`$exclusive/`)
+  subscriptions, change what other clients receive and are refused while
+  writes are off.
+- **The write gate never comes from an implicit `.env`.** `MQTT_WRITES_ENABLED`
+  counts only from the server's real environment or a file passed explicitly
+  with `--env-file`. When the server is launched directly, its working
+  directory is usually the MCP client's project, which may not be trusted; a
+  `.env` found there (or in a parent directory) may set connection settings,
+  but `MQTT_WRITES_ENABLED` in it is ignored with a warning on stderr. Note
+  that such a file can still point the server at a different broker.
+- **At most once.** The server never sends a publish or command a second time.
+  When a confirmation is late or lost it withdraws the message from the MQTT
+  client's queue and reports `success: false` with `meta.outcome: "unknown"`
+  and `meta.request_sent: true` ("may have been applied; check before
+  retrying"). QoS 1 remains at-least-once at the protocol level: if the
+  connection drops before the PUBACK while the tool is still waiting, the MQTT
+  client resends it.
 - **TLS for `mqtts://` URLs.** The broker certificate is verified against the
   system trust store or `MQTT_TLS_CA_FILE`, including the hostname. Mutual TLS
   works with `MQTT_TLS_CERT_FILE`/`MQTT_TLS_KEY_FILE`. `MQTT_TLS_INSECURE=true`
@@ -50,8 +66,9 @@ the office network.
   plant. Run it against a local broker that you start yourself, which needs no
   credentials and is reachable only from localhost.
 - **Leave writes off unless the agent is meant to change things.** Enable
-  `MQTT_WRITES_ENABLED` per deployment, deliberately. There is no undo, and a
-  language model will call a tool it has been given.
+  `MQTT_WRITES_ENABLED` per deployment, deliberately, in the MCP client's `env`
+  block or with `--env-file`. There is no undo, and a language model will call
+  a tool it has been given.
 - **Use a dedicated broker account with ACLs.** It should have the narrowest
   publish rights that still work. Grant `NCMD`/`DCMD` and retained publishes
   only if you mean the agent to command devices.

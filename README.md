@@ -157,7 +157,18 @@ Every tool returns the suite's envelope:
 { "success": true, "data": { "...": "..." }, "error": null, "meta": { "...": "..." } }
 ```
 
-On failure `success` is `false`, `data` is `null` and `error` says what went wrong, including invalid arguments. A tool never reports success for something that did not happen.
+On failure `success` is `false`, `data` is `null` and `error` says what went wrong, including invalid arguments (arguments are type-checked strictly: `true` is not accepted as a number, nor `1` as a boolean).
+
+Write tools also report what is known about the request in `meta.outcome` and `meta.request_sent`:
+
+| `meta.outcome` | `success` | Meaning |
+|----------------|-----------|---------|
+| `written` | `true` | Sent: QoS 0 written to the network, QoS 1/2 acknowledged by the broker |
+| `not_sent` | `false` | Nothing left the server (write gate closed, invalid argument, not connected, or withdrawn before it was written) |
+| `unknown` | `false` | It may have reached the broker (for example no PUBACK in time). The error says "may have been applied; check before retrying" |
+| `rejected` | `false` | Never reported: an MQTT 3.1.1 broker has no way to reject a publish |
+
+The server sends every publish and command **at most once**. Only connecting is retried; a publish whose confirmation is late or lost is never sent again by the server, and it is withdrawn from the MQTT client's queue so that it cannot go out after a reconnect. Two protocol facts remain: QoS 1 is at-least-once, so if the connection drops before the PUBACK *while the tool is still waiting*, the MQTT client resends it (flagged as a duplicate) and subscribers may get it twice; and a broker that silently drops a publish its ACL forbids (Mosquitto does) still acknowledges it, so `written` means the broker took it, not that anyone received it.
 
 | Tool | Kind | What it does |
 |------|------|--------------|
@@ -176,7 +187,9 @@ On failure `success` is `false`, `data` is `null` and `error` says what went wro
 
 ### Read-only by default
 
-The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscribing and reading are not writes: they change nothing that other clients see. The one exception is shared subscriptions (`$share/...`, `$queue/...`), which take messages away from the other members of the share group; they are refused while writes are disabled.
+The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscribing and reading are not writes: they change nothing that other clients see. The exceptions are broker extensions in filters that start with `$` (other than `$SYS/`): shared subscriptions (`$share/...`, `$queue/...`) take messages away from the other members of the share group, and exclusive ones (`$exclusive/...`) lock other clients out of a topic, so they are refused while writes are disabled.
+
+`MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. A `.env` file that the server finds by itself in its working directory, which is often the MCP client's project, may set connection settings but cannot enable writes: the server ignores `MQTT_WRITES_ENABLED` from it and logs a warning on stderr.
 
 ### Standard MQTT
 
@@ -264,12 +277,12 @@ Metrics are lists of `{"name": str, "value": ..., "type": str}`; see [Data Types
 
 ## Environment Variables
 
-The server reads its configuration when it starts, after loading a `.env` file from the working directory (or the nearest parent that has one); variables already set in the environment win over the file. An invalid value stops the server with a `configuration error` message on stderr. `uv run mqtt-mcp --help` prints the list below.
+The server reads its configuration when it starts. Before that it merges a `.env` file into the environment: the file given with `mqtt-mcp --env-file PATH`, or else the nearest `.env` in the working directory or one of its parents. Variables already set in the environment win over the file. An automatically found `.env` cannot set `MQTT_WRITES_ENABLED` (see [Read-only by default](#read-only-by-default)); [`mqtt-python/.env.example`](mqtt-python/.env.example) lists every setting. An invalid value stops the server with a `configuration error` message on stderr. `uv run mqtt-mcp --help` prints the list below.
 
 ### MQTT Connection
 
 - `MQTT_BROKER_URL` - Broker URL (default: `mqtt://127.0.0.1:1883`). `mqtt://host[:port]` is plain TCP; `mqtts://host[:port]` is TLS (default port 8883). Credentials in the URL are refused; use the variables below
-- `MQTT_CLIENT_ID` - Client identifier (default: `mqtt-mcp-` plus random hex, different for every process, so two servers never take each other's session)
+- `MQTT_CLIENT_ID` - Client identifier (default: `mqtt-mcp-` plus random hex, different for every process, so two servers never take each other's session). Never set it to the ID of another live client: the broker would disconnect that client (and publish its will)
 - `MQTT_USERNAME` - Optional username, sent with or without a password
 - `MQTT_PASSWORD` - Optional password (needs `MQTT_USERNAME`)
 - `MQTT_KEEPALIVE` - Keep-alive in seconds (default: `60`)
@@ -287,7 +300,7 @@ Setting a TLS variable with an `mqtt://` URL is a configuration error, so TLS ca
 
 ### Safety
 
-- `MQTT_WRITES_ENABLED` - `true` enables every publishing tool (default: `false`, read-only)
+- `MQTT_WRITES_ENABLED` - `true` enables every publishing tool and `$`-prefixed subscription filters (default: `false`, read-only). Honoured only from the real environment or `--env-file`, never from an automatically found `.env`
 
 ### Sparkplug B Namespace
 
@@ -337,7 +350,10 @@ The metric `type` values the publish tools accept (case-insensitive):
 - **The server as an edge node is minimal.** It does not act on NCMD/DCMD sent to its own edge node, including `Node Control/Rebirth`, and after an unexpected disconnect (when the broker has published its NDEATH will) it does not rebirth by itself: call `publish_node_birth` again. It publishes no aliases, properties, templates, datasets or arrays.
 - **Sparkplug host features are not implemented**: no `STATE` (Primary Host) messages, no sequence-gap detection or automatic rebirth requests for other nodes.
 - **`publish_message` sends UTF-8 text only**, no arbitrary binary payloads.
-- **Unconfirmed QoS 1/2 publishes are withdrawn using paho-mqtt internals** (so that a publish reported as failed is not sent later on reconnect). This is why `paho-mqtt` is pinned below 3.
+- **Unconfirmed publishes are withdrawn using paho-mqtt internals** (so that a publish reported as `not_sent` or `unknown` is not sent later). This is why `paho-mqtt` is pinned below 3. A QoS 0 message that was not written within `MQTT_TOOL_TIMEOUT` is withdrawn if it had not started; if it had, the outcome is `unknown`.
+- **The first `publish_node_birth` reconnects** (to register the NDEATH will): messages that arrive during the reconnect are missed, retained messages on the subscriptions are delivered again (so `read_messages` shows them twice), and a subscribe running at that moment fails.
+- **Discovery goes stale across this server's own reconnects.** Deaths published while it was disconnected are missed, so after a reconnect every discovered node and device shows `online: null` until it is heard from again.
+- **bdSeq starts at 0 in every server process**, as the specification asks. If a previous server process with the same edge node ID died without its will being delivered yet, a host may match that late will to the new node.
 
 ## Testing With The Mock Server
 
@@ -409,7 +425,7 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 
 ### CI
 
-[CI](.github/workflows/ci.yml) syncs both projects from their committed `uv.lock` on Python 3.10 and 3.14, runs `ruff check` and `ruff format --check`, byte-compiles, imports the console-script targets, runs `mqtt-mcp --help` and an MCP `initialize` + `tools/list` handshake without a broker, then starts Mosquitto in Docker and runs the full pytest suite (unit and integration) and a short run of the mock.
+[CI](.github/workflows/ci.yml) syncs both projects from their committed `uv.lock` on Python 3.10 and 3.14, runs `ruff check` and `ruff format --check`, byte-compiles, imports the console-script targets, runs `mqtt-mcp --help` and an MCP `initialize` + `tools/list` handshake without a broker, then starts Mosquitto in Docker and runs the full pytest suite (unit and integration) and a short run of the mock. A `lowest-direct` job runs the suite again with the lowest declared versions of the direct dependencies, so the floors in `pyproject.toml` stay true.
 
 ## Troubleshooting
 
@@ -424,7 +440,8 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 ### Writes are disabled
 
 **Issue:** a publish or command tool returns `Writes are disabled ...`
-- The server is read-only unless it is started with `MQTT_WRITES_ENABLED=true` (see [Read-only by default](#read-only-by-default))
+- The server is read-only unless it is started with `MQTT_WRITES_ENABLED=true` in its real environment or an `--env-file` (see [Read-only by default](#read-only-by-default))
+- If you put `MQTT_WRITES_ENABLED=true` in a `.env` next to the server, it is ignored on purpose; stderr says `Ignoring MQTT_WRITES_ENABLED ...`. Set it in the MCP client's `env` block or pass the file with `--env-file`
 
 ### No Devices Appearing
 
@@ -446,13 +463,13 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 ## Performance Notes
 
 - MQTT QoS 0 is fastest but provides no delivery guarantee; the broker does not acknowledge it, so success means "written to the network"
-- QoS 1 and 2 are acknowledged by the broker at the cost of latency
+- QoS 1 and 2 are acknowledged by the broker at the cost of latency (QoS 1 is at-least-once: duplicates are possible after a reconnect)
 - Sparkplug B NBIRTH, DBIRTH, NDATA, DDATA, DDEATH, NCMD and DCMD are published with QoS 0, as the specification requires; NDEATH (the will and the explicit one) uses QoS 1
 - Sequence numbers wrap after 255
 
 ## Security
 
-The server is read-only unless `MQTT_WRITES_ENABLED=true`. It supports TLS (`mqtts://`) with certificate verification, mutual TLS, and username/password authentication. For production use:
+The server is read-only unless `MQTT_WRITES_ENABLED=true` is set in its real environment or an explicit `--env-file` (a `.env` it finds by itself cannot enable writes). It sends each publish at most once and reports `meta.outcome: "unknown"` when it cannot tell whether a message got through. It supports TLS (`mqtts://`) with certificate verification, mutual TLS, and username/password authentication. For production use:
 - Use a production MQTT broker with authentication and TLS
 - Give the server's MQTT account ACLs that allow exactly the topics you intend; the broker is the only place to limit what it can read and, with writes enabled, publish
 - Enable writes only where an agent is meant to change things
