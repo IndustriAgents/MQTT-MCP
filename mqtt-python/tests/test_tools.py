@@ -579,11 +579,13 @@ async def test_nothing_is_handed_to_paho_once_the_client_is_gone(monkeypatch):
         return None
 
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    handed = []
+    monkeypatch.setattr(manager.client, "publish", lambda *a, **k: handed.append(a))
     manager.close_for_disconnect()
     with pytest.raises(mqtt_server.PublishError) as raised:
         await manager.publish("a/b", b"x", qos=1)
     assert raised.value.outcome == "not_sent"
-    assert manager.client._out_messages == {} and not manager.client._out_packet
+    assert handed == []  # paho never saw it
 
 
 async def test_a_session_restart_does_not_reconnect_once_closing(monkeypatch):
@@ -604,10 +606,14 @@ async def test_stop_waits_for_a_running_session_restart(monkeypatch):
     manager._loop = asyncio.get_running_loop()
     import time as clock
 
-    def slow_stop(*args):
-        clock.sleep(0.5)
+    calls = []
 
-    monkeypatch.setattr(manager, "_stop_network", slow_stop)
+    def stop_network(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            clock.sleep(0.5)  # only the restart's own stop is slow
+
+    monkeypatch.setattr(manager, "_stop_network", stop_network)
     restart = asyncio.ensure_future(manager.restart_session(None))
     await asyncio.sleep(0.1)
     await manager.stop()
