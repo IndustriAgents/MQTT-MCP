@@ -42,9 +42,15 @@ connect to a broker that you run.
 
 - Python 3.10+ and [`uv`](https://docs.astral.sh/uv/)
 - An MQTT 3.1.1 broker on `127.0.0.1:1883`, for example
-  [Mosquitto](https://mosquitto.org/) (`brew install mosquitto` or
-  `apt install mosquitto`, then `mosquitto -v`), or with Docker:
-  `docker run --rm -p 127.0.0.1:1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf`
+  [Mosquitto](https://mosquitto.org/):
+  - macOS: `brew install mosquitto && mosquitto -v`
+  - Debian/Ubuntu: `sudo apt install mosquitto mosquitto-clients`. The package
+    starts the broker as a service on 127.0.0.1:1883, so skip `mosquitto -v`
+    (it would fail with "Address already in use").
+  - Docker:
+    `docker run --rm --name mqtt-broker -p 127.0.0.1:1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf`.
+    The image contains `mosquitto_sub`, so watch traffic with
+    `docker exec mqtt-broker mosquitto_sub -h 127.0.0.1 -t '#' -v`.
 
 ## Getting set up
 
@@ -63,7 +69,8 @@ cd mqtt-mock-server
 uv sync
 uv run mqtt-mock-server
 
-# Terminal 2, from the repository root: the MCP server (speaks MCP on stdio)
+# Terminal 2, from the repository root: the MCP server (speaks MCP on stdio,
+# so it waits silently for a client; add MQTT_WRITES_ENABLED=true to publish)
 cd mqtt-python
 uv sync
 MQTT_BROKER_URL=mqtt://127.0.0.1:1883 uv run mqtt-mcp
@@ -75,17 +82,28 @@ The `uv.lock` of each project is committed, and CI installs with
 
 ## Checks CI runs
 
-Run the same checks from the repository root before opening a pull request:
+Run the same checks from the repository root before opening a pull request
+(`uv sync` installs pytest and ruff as development dependencies):
 
 ```bash
-(cd mqtt-python && uv sync --locked && uv run --locked python -m compileall -q src)
-(cd mqtt-mock-server && uv sync --locked && uv run --locked python -m compileall -q mqtt_mock_server.py)
+(cd mqtt-python && uv sync --locked && uv run --locked ruff check . \
+  && uv run --locked ruff format --check . && uv run --locked pytest)
+(cd mqtt-mock-server && uv sync --locked && uv run --locked ruff check . \
+  && uv run --locked ruff format --check .)
 ```
 
-CI also imports each console-script target and performs an MCP `initialize` and
-`tools/list` handshake with the server over stdio. That handshake needs no
-broker. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact
-steps. There is no unit-test suite yet, and tests are welcome.
+`pytest` runs the unit tests and, when it finds a broker, the integration
+tests: they start the mock edge node and drive the real server over stdio with
+the MCP client SDK. They use the broker in `MQTT_TEST_BROKER_URL` (for example
+`MQTT_TEST_BROKER_URL=mqtt://127.0.0.1:1883 uv run pytest`) or, if `mosquitto`
+is on `PATH`, start their own on a free port. Without a broker they are skipped
+locally; CI sets `MQTT_TEST_REQUIRE_BROKER=1`, which turns that into a failure.
+Each test uses its own topics and Sparkplug group, so a shared broker is fine.
+
+CI also byte-compiles the sources, imports each console-script target, runs
+`mqtt-mcp --help`, performs an MCP `initialize` and `tools/list` handshake
+without a broker, and runs the mock against Mosquitto for a few seconds. See
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) for the exact steps.
 
 ## Testing a change
 
@@ -95,11 +113,13 @@ real MCP client:
 
 ```bash
 npx @modelcontextprotocol/inspector uv --directory mqtt-python run mqtt-mcp
+# publishing tools need the write gate open:
+npx @modelcontextprotocol/inspector -e MQTT_WRITES_ENABLED=true uv --directory mqtt-python run mqtt-mcp
 ```
 
 Call the tool you changed and check its output. To see what actually reached
-the broker, watch it from another terminal, for example with
-`mosquitto_sub -h 127.0.0.1 -t '#' -v`.
+the broker, use `subscribe_topic` and `read_messages`, or watch it from another
+terminal, for example with `mosquitto_sub -h 127.0.0.1 -t '#' -v`.
 
 **Do not test against a production broker or equipment.** If a change
 genuinely cannot be verified against the mock and a local broker, say so in the
@@ -110,17 +130,20 @@ pull request and describe the bench you used.
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
   goes to `stderr`. A stray `print()` in the server corrupts the session. The
   mock is not an MCP server, so it may print.
-- An error is a returned message, not an exception that kills the server. The
-  model needs to be told what went wrong.
+- Every tool returns the suite's `{ success, data, error, meta }` envelope. An
+  error, including an invalid argument, is `success: false` with a message, not
+  an exception. Never report success for something that was not confirmed.
 - Keep tool names and argument names aligned with the other servers in
   IndustriConnect.
-- The suite's aim is a shared `{ success, data, error, meta }` response
-  envelope. This server does not use it yet; its tools return plain text. A
-  move to the envelope is welcome, but do it for every tool at once rather than
-  for some of them.
-- Anything that publishes can reach real devices. Call out in the pull request
-  any new or changed tool that publishes, especially Sparkplug `NCMD`/`DCMD`
-  or retained messages.
+- Configuration is read when the server starts (after `.env` is loaded),
+  never at import time.
+- Anything that publishes can reach real devices, so every publishing tool
+  checks `MQTT_WRITES_ENABLED` first and refuses while it is off (the
+  default). A new tool that publishes must do the same, and its description
+  must start with `WRITE:`. Call out such tools in the pull request,
+  especially Sparkplug `NCMD`/`DCMD` or retained messages.
+- Tool descriptions are what an agent plans with: keep them exact about what
+  the tool does and does not do.
 - If you add a tool, make sure the mock can exercise it, or nobody can test it
   without a plant.
 

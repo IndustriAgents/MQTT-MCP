@@ -10,20 +10,35 @@ subscribers include edge nodes and PLC gateways that act on Sparkplug B
 `NCMD`/`DCMD` commands, so a published message can move physical equipment.
 
 MQTT can be secured with TLS, authentication and topic ACLs on the broker.
-Whether it *is* secured is a property of your deployment. Be aware of what this
-server does and does not support today:
+Whether it *is* secured is a property of your deployment. What this server
+supports:
 
-- **No TLS.** Connections are plain TCP. The `mqtts://` prefix in
-  `MQTT_BROKER_URL` is accepted, but no TLS is set up; it is treated like
-  `mqtt://`, and the default port is still 1883. Anything sent, including the
-  username and password, crosses the network in clear text.
-- **Username and password only.** `MQTT_USERNAME` and `MQTT_PASSWORD` are used
-  only when *both* are set; a username on its own is silently ignored. Client
-  certificates are not supported.
-- **No read-only mode.** Every tool is always exposed, including
-  `publish_message`, `publish_node_command` and `publish_device_command`. The
-  only place to limit what the model can publish is the broker: give the
-  server's MQTT account an ACL that allows exactly the topics you intend.
+- **Read-only by default.** Every tool that publishes (`publish_message`, the
+  Sparkplug birth/data/death tools, `publish_node_command` and
+  `publish_device_command`) returns `success: false` and sends nothing unless
+  the server runs with `MQTT_WRITES_ENABLED=true`. All publishes are gated, not
+  only commands: on MQTT any topic can be acted on by a subscriber, retained
+  messages persist, and Sparkplug births and data change what host
+  applications show. Shared subscriptions (`$share/`, `$queue/`), which divert
+  messages from other consumers, are refused while writes are off.
+- **TLS for `mqtts://` URLs.** The broker certificate is verified against the
+  system trust store or `MQTT_TLS_CA_FILE`, including the hostname. Mutual TLS
+  works with `MQTT_TLS_CERT_FILE`/`MQTT_TLS_KEY_FILE`. `MQTT_TLS_INSECURE=true`
+  turns verification off and is meant for testing against a self-signed broker
+  only. `mqtt://` URLs are plain TCP, where everything, including the username
+  and password, crosses the network in clear text; setting a TLS option with an
+  `mqtt://` URL is a configuration error rather than a silent downgrade.
+- **Username, with or without password.** `MQTT_USERNAME` is sent on its own if
+  no `MQTT_PASSWORD` is set. Credentials in `MQTT_BROKER_URL` are refused, and
+  `get_broker_info` never shows the password.
+- **The broker is still the real boundary.** With writes enabled, the server
+  can publish to any topic its MQTT account may publish to. Give that account
+  an ACL that allows exactly the topics you intend.
+- **Read-only still reads.** Whatever the account may subscribe to (including
+  `#`) can end up in the model's context through `read_messages`. Restrict
+  subscribe rights too if some topics are sensitive, and treat received
+  payloads as untrusted input: anyone who can publish to a subscribed topic can
+  put text in front of the model.
 
 Treat the server as equipment on the control network, not as an application on
 the office network.
@@ -34,18 +49,20 @@ the office network.
   node so that an agent can be exercised end to end without touching real
   plant. Run it against a local broker that you start yourself, which needs no
   credentials and is reachable only from localhost.
+- **Leave writes off unless the agent is meant to change things.** Enable
+  `MQTT_WRITES_ENABLED` per deployment, deliberately. There is no undo, and a
+  language model will call a tool it has been given.
 - **Use a dedicated broker account with ACLs.** It should have the narrowest
   publish rights that still work. Grant `NCMD`/`DCMD` and retained publishes
-  only if you mean the agent to command devices. There is no undo, and a
-  language model will call a tool it has been given.
+  only if you mean the agent to command devices.
 - **Keep credentials out of files you commit.** Pass `MQTT_USERNAME` and
   `MQTT_PASSWORD` through the MCP client's `env` block or the environment,
   never through the repository.
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run beside the MCP client, not a network service.
-- **Do not send credentials over an untrusted network.** Until TLS is
-  supported, put the broker on the same host or a segmented control network, or
-  reach it through a tunnel you trust.
+- **Use `mqtts://` beyond localhost.** Do not send credentials over an
+  untrusted network in plain TCP, and do not use `MQTT_TLS_INSECURE` outside a
+  test bench.
 - **Never point it at a safety system.** Safety-instrumented functions are out
   of scope for anything in this repository.
 
