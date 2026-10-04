@@ -52,6 +52,11 @@ supports:
   reports it. If the connection drops while a call waits for a PUBACK, the
   server gives the message up before the MQTT client could resend it on
   reconnect, so it is not delivered twice.
+- **What a cancel tells you.** After an MCP cancel the client only receives
+  "Request cancelled"; the real outcome of the call is logged to the server's
+  stderr, not returned. A cancelled write whose message was already on the
+  socket may have been applied to the device: read the state back before
+  sending it again.
 - **Nothing is sent after the client is gone.** A call the MCP client cancels
   is withdrawn if its message is not yet on the socket. The last check before
   a message is handed to the MQTT client reads the MCP request's cancel flag

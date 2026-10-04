@@ -802,3 +802,78 @@ async def test_commands_refuse_an_empty_target():
             session, "publish_device_command", edge_node_id="", device_id="d", metrics=METRIC
         )
         assert device["success"] is False and "edge_node_id" in device["error"]
+
+
+def _birth_test_patches(monkeypatch, between):
+    """Patch publish_node_birth's path so that ``between(manager)`` runs after the
+    session restart has stopped the network and before it reconnects. Returns the
+    list of topics handed to paho and a holder for the manager."""
+    handed, holder = [], {}
+    real_to_thread = asyncio.to_thread
+
+    async def connected(self):
+        return None
+
+    async def stop_then(fn, *args):
+        if "manager" in holder:  # later calls (shutdown) run normally
+            return await real_to_thread(fn, *args)
+        fn(*args)  # the restart's _stop_network
+        holder["manager"] = fn.__self__
+        await between(fn.__self__)
+        await asyncio.sleep(0)  # like the real to_thread, end on a scheduling step
+
+    def spy(self, topic, payload=None, qos=0, retain=False, properties=None):
+        handed.append(topic)
+        info = mqtt.MQTTMessageInfo(1)
+        info.rc = mqtt.MQTT_ERR_NO_CONN
+        return info
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_stop_network", lambda self, *a: None)
+    monkeypatch.setattr(mqtt_server.asyncio, "to_thread", stop_then)
+    monkeypatch.setattr(mqtt_server._Client, "publish", spy)
+    return handed, holder
+
+
+async def test_a_birth_cancelled_during_the_session_restart_registers_no_will(monkeypatch):
+    """Cancelled between stopping the network and reconnecting: reconnect without the
+    NDEATH will, and no NBIRTH goes out."""
+    from mcp.shared.exceptions import McpError
+
+    async def cancel(manager):
+        # What the SDK does on notifications/cancelled: RequestResponder.cancel()
+        # cancels the request's scope and replies "Request cancelled".
+        context = mqtt_server.mcp._mcp_server.request_context
+        await context.session._in_flight[context.request_id].cancel()
+
+    handed, holder = _birth_test_patches(monkeypatch, cancel)
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        with anyio.fail_after(20):
+            with pytest.raises(McpError, match="cancelled"):
+                await session.call_tool("publish_node_birth", {})
+            await session.send_ping()
+        manager = holder["manager"]
+        assert manager.client._will is False  # no NDEATH will registered
+        assert manager._will_bd_seq is None and manager.will_active is False
+        assert manager.node_born is False
+    assert not any("/NBIRTH/" in topic for topic in handed)
+
+
+async def test_a_birth_whose_deadline_passes_during_the_restart_registers_no_will(monkeypatch):
+    """The call's deadline passes between stopping the network and reconnecting:
+    reconnect without the NDEATH will, no NBIRTH, outcome not_sent."""
+
+    async def run_out_the_deadline(manager):
+        await asyncio.sleep(manager.time_left() + 0.02)
+
+    handed, holder = _birth_test_patches(monkeypatch, run_out_the_deadline)
+    async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.4") as session:
+        with anyio.fail_after(20):
+            birth = await call(session, "publish_node_birth")
+        manager = holder["manager"]
+        assert manager.client._will is False
+        assert manager._will_bd_seq is None and manager.will_active is False
+    assert birth["success"] is False
+    assert birth["meta"]["outcome"] == "not_sent" and birth["meta"]["request_sent"] is False
+    assert "no NDEATH will was registered" in birth["error"]
+    assert not any("/NBIRTH/" in topic for topic in handed)

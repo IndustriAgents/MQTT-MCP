@@ -327,10 +327,9 @@ class MQTTClientManager:
             self.closing = True
         task = self._restart_task
         if task is not None and not task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(task), 2 * self.settings.tool_timeout + 1)
-            except BaseException as exc:  # finished with an error, or still stuck
-                logger.info("Session restart ended on shutdown: %s", exc)
+            await asyncio.wait({task}, timeout=2 * self.settings.tool_timeout + 1)
+            if not task.done():
+                logger.warning("The session restart did not finish before shutdown")
         with self._lock:
             for mid in list(self._inflight):
                 self._finish(mid)
@@ -773,10 +772,17 @@ class MQTTClientManager:
         client is never left half-restarted; ``stop()`` waits for it. It does not
         reconnect once ``closing`` is set.
         """
-        self._restart_task = asyncio.ensure_future(self._restart(bd_seq, _send_state.get()))
-        # Its error is reported to the caller; if the caller is gone, swallow it here.
-        self._restart_task.add_done_callback(lambda t: t.cancelled() or t.exception())
-        await asyncio.shield(self._restart_task)
+        task = asyncio.ensure_future(self._restart(bd_seq, _send_state.get()))
+        self._restart_task = task
+        # Its error is reported to the caller; if the caller is gone, it is dropped here.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        # asyncio.wait, unlike shield, neither cancels the task when this caller is
+        # cancelled nor reports its later error as "exception in shielded future".
+        await asyncio.wait({task})
+        if task.cancelled():
+            raise PublishError("the session restart was cancelled")
+        if task.exception() is not None:
+            raise task.exception()
 
     async def _restart(self, bd_seq: int | None, state: SendState | None = None) -> None:
         assert self.client is not None
