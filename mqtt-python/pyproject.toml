@@ -4,15 +4,39 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mqtt-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MQTT + Sparkplug B MCP server"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.9.1,<2",
-    "paho-mqtt>=1.6.1",
-    "protobuf>=4.24.0",
+    "mcp[cli]>=1.12,<2",
+    # The client uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
+    "paho-mqtt>=2.0,<3",
+    # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode), so any
+    # runtime with message_factory.GetMessageClass works.
+    "protobuf>=4.24",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]
 mqtt-mcp = "mqtt_mcp.cli:main"
 
+[dependency-groups]
+dev = [
+    "cryptography>=42",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: needs an MQTT broker (MQTT_TEST_BROKER_URL, or mosquitto on PATH)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

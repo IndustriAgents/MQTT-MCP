@@ -2,7 +2,9 @@
 
 Python implementation of an MQTT + Sparkplug B MCP server using FastMCP.
 
-This is the server package of the [MQTT MCP](../README.md) repository. The repository README covers the quick start with a broker and the mock edge node, and the [Known limitations](../README.md#known-limitations); see [CONTRIBUTING.md](../CONTRIBUTING.md) for development.
+This is the server package of the [MQTT MCP](../README.md) repository. The repository README covers the quick start with a broker and the mock edge node, the write gate, and the [Known limitations](../README.md#known-limitations); see [CONTRIBUTING.md](../CONTRIBUTING.md) for development.
+
+**Read-only by default:** the publishing tools return `success: false` and send nothing unless `MQTT_WRITES_ENABLED=true`.
 
 ## Installation
 
@@ -21,127 +23,119 @@ pip install -e .
 
 ```bash
 export MQTT_BROKER_URL=mqtt://127.0.0.1:1883
-export MQTT_CLIENT_ID=mqtt-mcp-python
 export SPARKPLUG_GROUP_ID=factory
-export SPARKPLUG_EDGE_NODE_ID=edge-node-1
+export SPARKPLUG_EDGE_NODE_ID=mcp-server
 uv run mqtt-mcp
 ```
 
-### With uv
+The server then waits silently for an MCP client on stdin: it speaks MCP (JSON-RPC) on stdio and logs to stderr. Normally your MCP client starts it (see [Usage with Claude Desktop](#usage-with-claude-desktop)); to try it by hand, run `npx @modelcontextprotocol/inspector uv --directory mqtt-python run mqtt-mcp` from the repository root. `uv run mqtt-mcp --help` lists the settings and `--version` prints the version.
 
-From the repository root:
-
-```bash
-cd mqtt-python
-export MQTT_BROKER_URL=mqtt://127.0.0.1:1883
-uv run mqtt-mcp
-```
+A `.env` file in the working directory (or the nearest parent with one) is loaded at startup; variables already set in the environment take precedence. An invalid setting stops the server with a `configuration error` on stderr (exit code 2).
 
 ## Configuration
 
 Environment variables:
 
-- `MQTT_BROKER_URL` - MQTT broker address (default: `mqtt://127.0.0.1:1883`). Plain TCP only: an `mqtts://` prefix is accepted, but TLS is not set up
-- `MQTT_CLIENT_ID` - MQTT client identifier (default: `mqtt-mcp-python`). Currently ignored: the client connects with an empty ID and the broker assigns one
-- `MQTT_USERNAME` - Optional authentication username (used only together with `MQTT_PASSWORD`)
-- `MQTT_PASSWORD` - Optional authentication password
+- `MQTT_BROKER_URL` - Broker address (default: `mqtt://127.0.0.1:1883`). `mqtts://` uses TLS (default port 8883)
+- `MQTT_CLIENT_ID` - MQTT client identifier (default: `mqtt-mcp-<random hex>`, unique per process)
+- `MQTT_USERNAME` - Optional username (sent with or without a password)
+- `MQTT_PASSWORD` - Optional password (needs `MQTT_USERNAME`)
 - `MQTT_KEEPALIVE` - Keep-alive interval in seconds (default: `60`)
+- `MQTT_TLS_CA_FILE` - CA file for verifying the broker (`mqtts://` only; default: system trust store)
+- `MQTT_TLS_CERT_FILE` / `MQTT_TLS_KEY_FILE` / `MQTT_TLS_KEY_PASSWORD` - Client certificate for mutual TLS
+- `MQTT_TLS_INSECURE` - `true` disables certificate and hostname verification (testing only)
+- `MQTT_WRITES_ENABLED` - `true` enables the publishing tools (default: `false`)
+- `MQTT_TOOL_TIMEOUT` - Seconds to wait for the connection and broker acknowledgements (default: `5`)
+- `MQTT_MESSAGE_BUFFER_SIZE` - Received messages kept for `read_messages` (default: `1000`)
 - `SPARKPLUG_GROUP_ID` - Sparkplug B group ID (default: `factory`)
-- `SPARKPLUG_EDGE_NODE_ID` - Sparkplug B edge node ID (default: `edge-node-1`)
+- `SPARKPLUG_EDGE_NODE_ID` - This server's Sparkplug B edge node ID, and the default target of NCMD/DCMD (default: `edge-node-1`)
 
 ## Tools
 
-### Standard MQTT Tools
+Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta": {...} }`. Invalid arguments come back as `success: false` with the reason.
 
-#### `publish_message`
-Publish a message to any MQTT topic.
+### Read-only tools
+
+#### `get_broker_info`
+Broker URL, TLS, client ID, username, whether the server is connected and the last connection error, whether writes are enabled, subscriptions, number of buffered messages, and the state of this server's own Sparkplug edge node.
+
+#### `subscribe_topic`
+Subscribe to a topic filter. Succeeds only after the broker's SUBACK and reports the granted QoS. Subscriptions are restored after a reconnect. Shared subscriptions (`$share/`, `$queue/`) need writes enabled, because they divert messages from other consumers.
 
 **Parameters:**
-- `topic` (string, required) - Topic name
-- `payload` (string, required) - Message payload
+- `topic` (string, required) - Topic filter (supports `+`/`#` wildcards)
+- `qos` (number, optional, 0-2) - Maximum QoS (default: 0)
+
+#### `unsubscribe_topic`
+Remove one of this server's subscriptions (fails if the server holds no subscription with that exact filter).
+
+**Parameters:**
+- `topic` (string, required) - The subscribed filter
+
+#### `list_subscriptions`
+The subscriptions this server holds, with the QoS the broker granted.
+
+#### `read_messages`
+Messages received on the subscriptions (newest `MQTT_MESSAGE_BUFFER_SIZE` kept). Each has `id`, `topic`, `qos`, `retain`, `received_at`, `payload` (UTF-8 text, or hex for binary and Sparkplug payloads), `payload_encoding`, and for Sparkplug topics the decoded payload under `sparkplug`.
+
+**Parameters:**
+- `topic_filter` (string, optional) - Only messages whose topic matches this filter
+- `limit` (number, optional, 1-1000) - At most this many (default: 50)
+- `since_id` (number, optional) - Only messages after this id, oldest first; pass `meta.last_id` from the previous call to poll. Without it, the newest `limit` messages are returned
+
+#### `list_sparkplug_nodes`
+Sparkplug B edge nodes and devices seen in messages received on the subscriptions (subscribe to `spBv1.0/#` first): online state, last message type and time, bdSeq, latest metric values. Also reports this server's own edge node.
+
+#### `decode_sparkplug_payload`
+Decode a hex-encoded Sparkplug B payload: timestamp, seq, and metrics with name, alias, timestamp, datatype and value.
+
+**Parameters:**
+- `payload_hex` (string, required) - Hex-encoded protobuf data (spaces and `0x` are ignored)
+
+### Write tools (need `MQTT_WRITES_ENABLED=true`)
+
+Sparkplug metrics are lists of `{"name": str, "value": ..., "type": str}` where `type` is one of `int8`, `int16`, `int32` (or `int`), `int64` (or `long`), `uint8`, `uint16`, `uint32`, `uint64`, `float`, `double`, `boolean` (or `bool`), `string`, `text`, `uuid`, `datetime` (ms since the epoch) or `bytes` (hex). The value must match the type and its range; `null` sends a null metric. Anything else is rejected and nothing is sent.
+
+#### `publish_message`
+Publish UTF-8 text. Success means: QoS 0 written to the network; QoS 1/2 acknowledged by the broker.
+
+**Parameters:**
+- `topic` (string, required) - Topic name (no wildcards)
+- `payload` (string, required) - Message text
 - `qos` (number, optional, 0-2) - Quality of Service level (default: 0)
 - `retain` (boolean, optional) - Retain message on broker (default: false)
 
-#### `subscribe_topic`
-Subscribe to an MQTT topic pattern. The subscription is registered with the broker; received messages are not stored or returned yet.
+#### `publish_node_command` / `publish_device_command`
+Send NCMD / DCMD (QoS 0, no `seq`, as Sparkplug requires). Success means the command was sent, not that the node applied it.
 
 **Parameters:**
-- `topic` (string, required) - Topic pattern (supports +/# wildcards)
-- `qos` (number, optional, 0-2) - Quality of Service level (default: 0)
-
-#### `unsubscribe_topic`
-Unsubscribe from an MQTT topic.
-
-**Parameters:**
-- `topic` (string, required) - Topic name
-
-#### `list_subscriptions`
-List currently active subscriptions.
-
-#### `get_broker_info`
-Get connection info and status of the MQTT broker.
-
-### Sparkplug B Tools
+- `device_id` (string, required for DCMD) - Target device
+- `metrics` (array, required) - At least one metric
+- `edge_node_id` (string, optional) - Target edge node (default: `SPARKPLUG_EDGE_NODE_ID`)
+- `group_id` (string, optional) - Target group (default: `SPARKPLUG_GROUP_ID`)
 
 #### `publish_node_birth`
-Publish a Sparkplug B Node Birth (NBIRTH) certificate.
+Make this server the edge node `SPARKPLUG_GROUP_ID`/`SPARKPLUG_EDGE_NODE_ID` and publish its NBIRTH (`seq` 0, with `bdSeq` and `Node Control/Rebirth` added). The first birth on a connection reconnects with an NDEATH Last Will carrying a new bdSeq.
 
 **Parameters:**
-- `metrics` (array, optional) - Node metrics:
-  - `name` (string, required) - Metric name
-  - `value` (number/string/boolean, required) - Metric value
-  - `type` (string, required) - Data type: "int32" (or "int"), "float", "bool", "string". Any other value, including "boolean", is sent as a string
+- `metrics` (array, optional) - Node metrics
 
 #### `publish_node_death`
-Publish a Sparkplug B Node Death (NDEATH) certificate.
+Publish this server's NDEATH (bdSeq, no seq, QoS 1). Needs a born node.
 
-#### `publish_device_birth`
-Publish a Sparkplug B Device Birth (DBIRTH) certificate.
-
-**Parameters:**
-- `device_id` (string, required) - Device identifier
-- `metrics` (array, required) - Device metrics
-
-#### `publish_device_death`
-Publish a Sparkplug B Device Death (DDEATH) certificate.
+#### `publish_device_birth` / `publish_device_death`
+DBIRTH / DDEATH for a device of this server's node. DBIRTH needs a born node; DDEATH a device born by this server.
 
 **Parameters:**
 - `device_id` (string, required) - Device identifier
+- `metrics` (array, required for DBIRTH, may be empty) - Device metrics
 
-#### `publish_node_data`
-Publish Sparkplug B Node Data (NDATA) with updated metrics.
-
-**Parameters:**
-- `metrics` (array, required) - Updated node metrics
-
-#### `publish_device_data`
-Publish Sparkplug B Device Data (DDATA) with updated metrics.
+#### `publish_node_data` / `publish_device_data`
+NDATA / DDATA with at least one metric. Need a born node (and, for DDATA, a born device).
 
 **Parameters:**
-- `device_id` (string, required) - Device identifier
-- `metrics` (array, required) - Updated device metrics
-
-#### `publish_node_command`
-Publish a Sparkplug B Node Command (NCMD).
-
-**Parameters:**
-- `metrics` (array, required) - Command metrics
-
-#### `publish_device_command`
-Publish a Sparkplug B Device Command (DCMD).
-
-**Parameters:**
-- `device_id` (string, required) - Device identifier
-- `metrics` (array, required) - Command metrics
-
-#### `list_sparkplug_nodes`
-List the Sparkplug B birth certificates this server has published. It does not discover other edge nodes on the broker.
-
-#### `decode_sparkplug_payload`
-Decode a hex-encoded Sparkplug B protobuf payload (for debugging). Currently fails with `name 'sparkplug_b_pb2' is not defined`.
-
-**Parameters:**
-- `payload_hex` (string, required) - Hex-encoded protobuf data
+- `device_id` (string, required for DDATA) - Device identifier
+- `metrics` (array, required) - Updated metrics
 
 ## Usage with Claude Desktop
 
@@ -155,42 +149,42 @@ Add to `claude_desktop_config.json`:
       "args": ["--directory", "/absolute/path/to/MQTT-MCP/mqtt-python", "run", "mqtt-mcp"],
       "env": {
         "MQTT_BROKER_URL": "mqtt://127.0.0.1:1883",
-        "MQTT_CLIENT_ID": "mqtt-mcp-python",
         "SPARKPLUG_GROUP_ID": "factory",
-        "SPARKPLUG_EDGE_NODE_ID": "edge-node-1"
+        "SPARKPLUG_EDGE_NODE_ID": "mcp-server"
       }
     }
   }
 }
 ```
 
+Add `"MQTT_WRITES_ENABLED": "true"` to `env` only if the agent may publish.
+
 ## Dependencies
 
-- `mcp[cli]>=1.9.1,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, so the server needs 1.x; `uv.lock` pins 1.21.1)
-- `paho-mqtt>=1.6.1` - MQTT client (the code uses the paho-mqtt 2.x callback API; `uv.lock` pins 2.1.0)
-- `protobuf>=4.24.0` - Protobuf runtime
+- `mcp[cli]>=1.12,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, so the server needs 1.x)
+- `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
+- `protobuf>=4.24` - Protobuf runtime for the Sparkplug B schema
+- `python-dotenv>=1.0` - `.env` loading
 
-Sparkplug B payloads are encoded by a small built-in encoder, not by the official `sparkplug_b.proto` bindings.
+Sparkplug B payloads are encoded and decoded with `mqtt_mcp/sparkplug_b_pb2.py`, which provides the same classes as the `sparkplug_b_pb2` module protoc generates from `sparkplug_b.proto` but builds the descriptor at import time, so it works with any protobuf runtime from 4.24 on (protoc-generated code is tied to the protoc version that wrote it).
+
+Development dependencies (`uv sync` installs them): `pytest`, `ruff`, and `cryptography` (test TLS certificates).
 
 ## Architecture
 
 The server uses FastMCP's lifespan context manager to:
-1. Create and connect MQTT client on startup
-2. Share the client across all tool handlers
-3. Properly disconnect on shutdown
+1. Read the configuration (after `.env`) and start connecting to the broker in the background; paho-mqtt retries until the broker answers and after every drop
+2. Share the client, the received-message buffer and the Sparkplug registry across all tool handlers
+3. Publish NDEATH (if this server's edge node is born) and disconnect on shutdown
 
-Most tools are async and integrate with the FastMCP framework's event loop; `list_subscriptions`, `get_broker_info`, `list_sparkplug_nodes` and `decode_sparkplug_payload` are plain functions.
+Received messages are stored by paho's network thread; Sparkplug messages also update the registry behind `list_sparkplug_nodes`.
 
 ## Development
 
 ```bash
-# Install development dependencies
-uv sync
-
-# Run the server
-uv run mqtt-mcp
-
-# Format code (ruff is not a project dependency, so run it through uvx)
-uvx ruff format .
+uv sync                      # includes pytest and ruff
+uv run ruff check . && uv run ruff format --check .
+uv run pytest                # unit tests; integration tests need a broker:
+MQTT_TEST_BROKER_URL=mqtt://127.0.0.1:1883 uv run pytest
+uv run mqtt-mcp              # run the server
 ```
-
