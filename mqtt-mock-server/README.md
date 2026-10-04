@@ -1,21 +1,25 @@
 # MQTT Mock Server with Sparkplug B Simulation
 
-Local MQTT mock server for testing and development. Simulates an MQTT broker with Sparkplug B edge nodes, devices, and periodic metric updates.
+Local MQTT mock for testing and development. It simulates a Sparkplug B edge node with two devices and periodic metric updates.
+
+The mock is an MQTT **client**, not a broker: it connects to the broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT` (default `127.0.0.1:1883`) and publishes there, so start a broker first (for example `mosquitto -v`). See the [repository README](../README.md) for the full quick start.
 
 ## Features
 
-- Embedded MQTT broker simulation (publishes to local network)
+- Publishes to an MQTT broker you run (no broker built in)
 - Sparkplug B edge node with:
   - Node birth/death certificates (NBIRTH/NDEATH)
   - Multiple simulated devices with DBIRTH/DDEATH
   - Periodic NDATA and DDATA updates
-  - Sequence number tracking
+  - Sequence numbers: one counter for the node and its devices (NBIRTH goes out with `seq` 1 rather than 0, and no `bdSeq` metric is sent)
   - Proper timestamps
 - Standard MQTT topics for basic testing
 - Configurable via environment variables
 - Graceful shutdown with proper cleanup
 
 ## Quick Start
+
+With a broker listening on `127.0.0.1:1883`, from the repository root:
 
 ```bash
 cd mqtt-mock-server
@@ -52,15 +56,17 @@ uv run mqtt-mock-server
 - `spBv1.0/{GROUP_ID}/NBIRTH/{EDGE_NODE_ID}` - Node birth certificate
 - `spBv1.0/{GROUP_ID}/NDEATH/{EDGE_NODE_ID}` - Node death certificate
 - `spBv1.0/{GROUP_ID}/NDATA/{EDGE_NODE_ID}` - Node data updates
-- `spBv1.0/{GROUP_ID}/NCMD/{EDGE_NODE_ID}` - Node commands (listen-only)
+- `spBv1.0/{GROUP_ID}/NCMD/{EDGE_NODE_ID}` - Node commands (not subscribed: the mock does not act on commands)
 
 **Device Topics:**
 - `spBv1.0/{GROUP_ID}/DBIRTH/{EDGE_NODE_ID}/{DEVICE_ID}` - Device birth
 - `spBv1.0/{GROUP_ID}/DDEATH/{EDGE_NODE_ID}/{DEVICE_ID}` - Device death
 - `spBv1.0/{GROUP_ID}/DDATA/{EDGE_NODE_ID}/{DEVICE_ID}` - Device data updates
-- `spBv1.0/{GROUP_ID}/DCMD/{EDGE_NODE_ID}/{DEVICE_ID}` - Device commands (listen-only)
+- `spBv1.0/{GROUP_ID}/DCMD/{EDGE_NODE_ID}/{DEVICE_ID}` - Device commands (not subscribed: the mock does not act on commands)
 
 ### Standard MQTT Topics
+
+JSON payloads with fixed values, except the uptime in `system/status`:
 
 - `sensors/temperature` - Temperature reading (°C)
 - `sensors/pressure` - Pressure reading (kPa)
@@ -81,9 +87,9 @@ uv run mqtt-mock-server
 ### Device 2: Control Module
 - **Topic:** `spBv1.0/factory/D{BIRTH|DATA}/edge-node-1/device-2`
 - **Metrics:**
-  - `pump_speed` (int, %) - 0-100
-  - `valve_position` (int, %) - 0-100
-  - `enabled` (bool) - On/off
+  - `pump_speed` (int, %) - fixed at 0
+  - `valve_position` (int, %) - fixed at 50
+  - `enabled` (bool) - fixed at off
 
 ## Node Metrics
 
@@ -92,7 +98,7 @@ uv run mqtt-mock-server
 
 ## Testing with MCP Servers
 
-Once the mock server is running on port 1883, connect your MCP server:
+Once a broker is running on port 1883, start the mock and connect your MCP server to the same broker. Both terminals start at the repository root:
 
 ```bash
 # Terminal 1 - Start mock server
@@ -100,30 +106,26 @@ cd mqtt-mock-server
 uv run mqtt-mock-server
 
 # Terminal 2 - Start MCP server (Python)
-cd ../mqtt-python
+cd mqtt-python
 export MQTT_BROKER_URL=mqtt://127.0.0.1:1883
 uv run mqtt-mcp
 ```
 
 Then use MCP tools to:
-- Subscribe to topics and receive data
-- Publish commands to devices
-- Monitor Sparkplug B birth/death certificates
-- Read metric values
+- Check the broker connection (`get_broker_info`)
+- Subscribe to topics (the server registers the subscription but does not return received messages yet)
+- Publish messages and Sparkplug B commands (the mock does not act on commands)
+
+To see what the mock publishes, watch the broker directly, for example `mosquitto_sub -h 127.0.0.1 -t '#' -v` (Sparkplug B payloads are binary).
 
 ## Common Test Operations
 
-### Read device metrics
+### Watch device metrics
 
-```json
-{
-  "tool": "publish_message",
-  "parameters": {
-    "topic": "spBv1.0/factory/DDATA/edge-node-1/device-1",
-    "payload": "",
-    "qos": 0
-  }
-}
+The MCP server cannot read metric values yet. Publishing to a `DDATA` topic does not read anything; it would inject a message as if it came from the device. Watch the broker instead:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -t 'spBv1.0/factory/DDATA/edge-node-1/+' -v
 ```
 
 ### Monitor all device data
@@ -145,7 +147,7 @@ system/#
 ## Architecture
 
 The mock server:
-1. Connects to a local MQTT broker simulator
+1. Connects to the MQTT broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT`
 2. Publishes NBIRTH to announce the edge node
 3. Publishes DBIRTH for each device (device-1, device-2)
 4. Every UPDATE_INTERVAL seconds:
@@ -156,14 +158,14 @@ The mock server:
 
 ## Limitations
 
-- This is a mock server that publishes data; it doesn't simulate a full MQTT broker
-- Subscriptions are not processed (no message queuing)
+- This is a mock edge node that publishes data; it is not an MQTT broker and needs one to connect to
+- It subscribes to nothing, so NCMD/DCMD commands are not acted on
+- Payloads use a hand-rolled protobuf encoder whose metric field numbers do not match `sparkplug_b.proto`, so standard Sparkplug B decoders cannot read the values
 - QoS 0 (at-most-once delivery) is simplified
 - No authentication or encryption
 - Designed for local testing only
 
 ## Dependencies
 
-- `paho-mqtt>=1.6.1` - MQTT client
-- `sparkplug-b>=1.0.12` - Sparkplug B protobuf definitions
-- `protobuf>=4.24.0` - Protobuf serialization
+- `paho-mqtt>=1.6.1` - MQTT client (the code uses the paho-mqtt 2.x callback API; `uv.lock` pins 2.1.0)
+- `protobuf>=4.24.0` - Protobuf runtime (Sparkplug B payloads are encoded by hand, without the official bindings)

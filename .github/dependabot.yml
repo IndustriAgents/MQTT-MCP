@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # Keeps the pinned action majors in .github/workflows current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: uv
+    directory: /mqtt-python
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # The server is written against mcp 1.x (mcp.server.fastmcp), which
+      # mcp 2.x removed; pyproject.toml pins mcp<2 until it is ported.
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: uv
+    directory: /mqtt-mock-server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

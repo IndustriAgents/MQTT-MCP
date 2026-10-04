@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded pull request runs to save CI minutes. Pushes to main are
+# never cancelled, so every commit on main keeps a finished run (and the badge
+# reflects it).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# Cheap, deterministic checks only: nothing here needs an MQTT broker or the
+# mock running. Each uv project is synced from its committed uv.lock
+# (`--locked` fails the job if pyproject.toml and uv.lock have drifted apart).
+# The matrix covers the declared floor (requires-python >=3.10) and a current
+# release.
+jobs:
+  server:
+    name: mqtt-python (MCP server) / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    defaults:
+      run:
+        working-directory: mqtt-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Byte-compile sources
+        run: uv run --locked python -m compileall -q src
+
+      - name: Import the console-script target
+        run: |
+          uv run --locked python - <<'EOF'
+          from importlib.metadata import entry_points
+
+          (ep,) = entry_points(group="console_scripts", name="mqtt-mcp")
+          assert callable(ep.load()), ep
+          print(f"mqtt-mcp -> {ep.value}")
+          EOF
+
+      # The server tolerates an unreachable broker at startup, so this needs no
+      # broker: it proves the server boots and answers MCP over stdio. Port 1
+      # is used so that nothing on the runner can answer as a broker.
+      - name: MCP handshake over stdio (initialize + tools/list)
+        env:
+          MQTT_BROKER_URL: mqtt://127.0.0.1:1
+        run: |
+          uv run --locked python - <<'EOF'
+          import asyncio
+          import os
+
+          from mcp import ClientSession, StdioServerParameters
+          from mcp.client.stdio import stdio_client
+
+
+          async def main() -> None:
+              params = StdioServerParameters(
+                  command="uv", args=["run", "--locked", "mqtt-mcp"], env=dict(os.environ)
+              )
+              async with stdio_client(params) as (read, write):
+                  async with ClientSession(read, write) as session:
+                      init = await session.initialize()
+                      tools = (await session.list_tools()).tools
+                      print(f"{init.serverInfo.name}: {len(tools)} tools")
+                      print(", ".join(sorted(t.name for t in tools)))
+                      assert tools, "the server registered no tools"
+
+
+          asyncio.run(asyncio.wait_for(main(), timeout=120))
+          EOF
+
+  mock:
+    name: mqtt-mock-server / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    defaults:
+      run:
+        working-directory: mqtt-mock-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Byte-compile sources
+        run: uv run --locked python -m compileall -q mqtt_mock_server.py
+
+      # Running the mock needs a broker to publish to, so only the import and
+      # the console-script target are checked here.
+      - name: Import the console-script target
+        run: |
+          uv run --locked python - <<'EOF'
+          from importlib.metadata import entry_points
+
+          (ep,) = entry_points(group="console_scripts", name="mqtt-mock-server")
+          assert callable(ep.load()), ep
+          print(f"mqtt-mock-server -> {ep.value}")
+          EOF

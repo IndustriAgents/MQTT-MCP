@@ -2,6 +2,8 @@
 
 Python implementation of an MQTT + Sparkplug B MCP server using FastMCP.
 
+This is the server package of the [MQTT MCP](../README.md) repository. The repository README covers the quick start with a broker and the mock edge node, and the [Known limitations](../README.md#known-limitations); see [CONTRIBUTING.md](../CONTRIBUTING.md) for development.
+
 ## Installation
 
 ```bash
@@ -27,6 +29,8 @@ uv run mqtt-mcp
 
 ### With uv
 
+From the repository root:
+
 ```bash
 cd mqtt-python
 export MQTT_BROKER_URL=mqtt://127.0.0.1:1883
@@ -37,9 +41,9 @@ uv run mqtt-mcp
 
 Environment variables:
 
-- `MQTT_BROKER_URL` - MQTT broker address (default: `mqtt://127.0.0.1:1883`)
-- `MQTT_CLIENT_ID` - MQTT client identifier (default: `mqtt-mcp-python`)
-- `MQTT_USERNAME` - Optional authentication username
+- `MQTT_BROKER_URL` - MQTT broker address (default: `mqtt://127.0.0.1:1883`). Plain TCP only: an `mqtts://` prefix is accepted, but TLS is not set up
+- `MQTT_CLIENT_ID` - MQTT client identifier (default: `mqtt-mcp-python`). Currently ignored: the client connects with an empty ID and the broker assigns one
+- `MQTT_USERNAME` - Optional authentication username (used only together with `MQTT_PASSWORD`)
 - `MQTT_PASSWORD` - Optional authentication password
 - `MQTT_KEEPALIVE` - Keep-alive interval in seconds (default: `60`)
 - `SPARKPLUG_GROUP_ID` - Sparkplug B group ID (default: `factory`)
@@ -59,7 +63,7 @@ Publish a message to any MQTT topic.
 - `retain` (boolean, optional) - Retain message on broker (default: false)
 
 #### `subscribe_topic`
-Subscribe to an MQTT topic pattern.
+Subscribe to an MQTT topic pattern. The subscription is registered with the broker; received messages are not stored or returned yet.
 
 **Parameters:**
 - `topic` (string, required) - Topic pattern (supports +/# wildcards)
@@ -86,7 +90,7 @@ Publish a Sparkplug B Node Birth (NBIRTH) certificate.
 - `metrics` (array, optional) - Node metrics:
   - `name` (string, required) - Metric name
   - `value` (number/string/boolean, required) - Metric value
-  - `type` (string, required) - Data type: "int32", "float", "boolean", "string"
+  - `type` (string, required) - Data type: "int32" (or "int"), "float", "bool", "string". Any other value, including "boolean", is sent as a string
 
 #### `publish_node_death`
 Publish a Sparkplug B Node Death (NDEATH) certificate.
@@ -131,10 +135,10 @@ Publish a Sparkplug B Device Command (DCMD).
 - `metrics` (array, required) - Command metrics
 
 #### `list_sparkplug_nodes`
-List discovered Sparkplug B nodes and their birth certificates.
+List the Sparkplug B birth certificates this server has published. It does not discover other edge nodes on the broker.
 
 #### `decode_sparkplug_payload`
-Decode a hex-encoded Sparkplug B protobuf payload (for debugging).
+Decode a hex-encoded Sparkplug B protobuf payload (for debugging). Currently fails with `name 'sparkplug_b_pb2' is not defined`.
 
 **Parameters:**
 - `payload_hex` (string, required) - Hex-encoded protobuf data
@@ -148,7 +152,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "mqtt-mcp-python": {
       "command": "uv",
-      "args": ["--directory", "/absolute/path/to/mqtt-python", "run", "mqtt-mcp"],
+      "args": ["--directory", "/absolute/path/to/MQTT-MCP/mqtt-python", "run", "mqtt-mcp"],
       "env": {
         "MQTT_BROKER_URL": "mqtt://127.0.0.1:1883",
         "MQTT_CLIENT_ID": "mqtt-mcp-python",
@@ -162,10 +166,11 @@ Add to `claude_desktop_config.json`:
 
 ## Dependencies
 
-- `mcp[cli]>=1.9.1` - MCP framework with FastMCP
-- `paho-mqtt>=1.6.1` - MQTT client
-- `sparkplug-b>=1.0.12` - Sparkplug B protobuf definitions
-- `protobuf>=4.24.0` - Protobuf serialization
+- `mcp[cli]>=1.9.1,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, so the server needs 1.x; `uv.lock` pins 1.21.1)
+- `paho-mqtt>=1.6.1` - MQTT client (the code uses the paho-mqtt 2.x callback API; `uv.lock` pins 2.1.0)
+- `protobuf>=4.24.0` - Protobuf runtime
+
+Sparkplug B payloads are encoded by a small built-in encoder, not by the official `sparkplug_b.proto` bindings.
 
 ## Architecture
 
@@ -174,7 +179,7 @@ The server uses FastMCP's lifespan context manager to:
 2. Share the client across all tool handlers
 3. Properly disconnect on shutdown
 
-All tools are async and integrate with the FastMCP framework's event loop.
+Most tools are async and integrate with the FastMCP framework's event loop; `list_subscriptions`, `get_broker_info`, `list_sparkplug_nodes` and `decode_sparkplug_payload` are plain functions.
 
 ## Development
 
@@ -185,7 +190,7 @@ uv sync
 # Run the server
 uv run mqtt-mcp
 
-# Format code
-uv run ruff format .
+# Format code (ruff is not a project dependency, so run it through uvx)
+uvx ruff format .
 ```
 

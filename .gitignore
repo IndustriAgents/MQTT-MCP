@@ -1,0 +1,27 @@
+# Repository-wide ignores. mqtt-python/ and mqtt-mock-server/ keep their own
+# .gitignore files as well. Each uv project's uv.lock is committed on purpose:
+# CI installs with `uv sync --locked`.
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and local environment
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/

@@ -370,7 +370,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.9.1" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.9.1,<2" },
     { name = "paho-mqtt", specifier = ">=1.6.1" },
     { name = "protobuf", specifier = ">=4.24.0" },
 ]
