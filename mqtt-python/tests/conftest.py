@@ -41,7 +41,7 @@ BIN = Path(sys.executable).parent
 SERVER_EXE = BIN / "mqtt-mcp"
 
 #: Every variable the server reads; tests set all of them so that a stray .env
-#: file can never change what is under test (load_dotenv does not override).
+#: file can never change what is under test (.env values never override set variables).
 SERVER_VARS = (
     "MQTT_BROKER_URL",
     "MQTT_CLIENT_ID",

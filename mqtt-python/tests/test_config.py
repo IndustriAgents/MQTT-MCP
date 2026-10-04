@@ -1,4 +1,5 @@
-"""Configuration: read after load_dotenv, never at import; TLS, credentials, client ID."""
+"""Configuration: read after the .env merge, never at import; the .env gate rule; TLS,
+credentials, client ID."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from mqtt_mcp.mqtt_server import build_client
 
 @pytest.fixture(autouse=True)
 def fresh_settings():
-    """Forget cached settings and undo whatever load_dotenv put into os.environ."""
+    """Forget cached settings and undo whatever a .env merge put into os.environ."""
     saved = dict(os.environ)
     mqtt_server.set_settings(None)
     yield
