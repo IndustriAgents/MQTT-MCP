@@ -151,7 +151,13 @@ pull request and describe the bench you used.
   must start with `WRITE:`. Call out such tools in the pull request,
   especially Sparkplug `NCMD`/`DCMD` or retained messages.
 - The write gate is read only from the real environment or `--env-file`,
-  never from an automatically found `.env`.
+  never from the automatic `mqtt-python/.env`; no `.env` is ever read from the
+  working directory, and the automatic one may set only `MQTT_*`/`SPARKPLUG_*`.
+- Every broker wait is bounded, and every tool call has an overall deadline;
+  nothing may hang without an outcome.
+- Test helpers that start processes (mock, broker) must stop them when pytest
+  dies: the mock runs with `--exit-on-stdin-eof`, other helpers through
+  `tests/watchdog.py`.
 - A publish is sent at most once. Never retry one whose confirmation is late
   or lost; report `meta.outcome: "unknown"` with `meta.request_sent: true`.
   Only connecting may be retried.

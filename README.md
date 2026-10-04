@@ -189,7 +189,7 @@ The server sends every publish and command **at most once**. Only connecting is 
 
 The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscribing and reading are not writes: they change nothing that other clients see. The exceptions are broker extensions in filters that start with `$` (other than `$SYS/`): shared subscriptions (`$share/...`, `$queue/...`) take messages away from the other members of the share group, and exclusive ones (`$exclusive/...`) lock other clients out of a topic, so they are refused while writes are disabled.
 
-`MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. A `.env` file that the server finds by itself in its working directory, which is often the MCP client's project, may set connection settings but cannot enable writes: the server ignores `MQTT_WRITES_ENABLED` from it and logs a warning on stderr. The name is matched case-insensitively and with or without an `export ` prefix (Windows upper-cases environment names, so `mqtt_writes_enabled=true` would otherwise count there).
+`MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. The only `.env` the server loads by itself is `mqtt-python/.env` of a source checkout, found next to the package source; it never reads a `.env` from its working directory or any parent, because when an MCP client launches the server directly, the working directory is the client's project, which may not be trusted (and settings such as the broker decide where a write goes). An installed package has no automatic `.env` at all. Even `mqtt-python/.env` may set only `MQTT_*` and `SPARKPLUG_*` variables and cannot enable writes: `MQTT_WRITES_ENABLED` in it (matched in any letter case and with or without `export `, since Windows upper-cases environment names) and any other variable (`PATH`, `PYTHONPATH`, `LD_PRELOAD`, ...) are ignored with a warning on stderr.
 
 ### Standard MQTT
 
@@ -277,7 +277,7 @@ Metrics are lists of `{"name": str, "value": ..., "type": str}`; see [Data Types
 
 ## Environment Variables
 
-The server reads its configuration when it starts. Before that it merges a `.env` file into the environment: the file given with `mqtt-mcp --env-file PATH`, or else the nearest `.env` in the working directory or one of its parents. Variables already set in the environment win over the file. An automatically found `.env` cannot set `MQTT_WRITES_ENABLED` (see [Read-only by default](#read-only-by-default)); [`mqtt-python/.env.example`](mqtt-python/.env.example) lists every setting. An invalid value stops the server with a `configuration error` message on stderr. `uv run mqtt-mcp --help` prints the list below.
+The server reads its configuration when it starts. Before that it merges a `.env` file into the environment: the file given with `mqtt-mcp --env-file PATH`, or else `mqtt-python/.env` of a source checkout (never the working directory or its parents; an installed package has none). Variables already set in the environment win over the file. The automatic `mqtt-python/.env` may set only `MQTT_*` and `SPARKPLUG_*` variables and not `MQTT_WRITES_ENABLED` (see [Read-only by default](#read-only-by-default)); [`mqtt-python/.env.example`](mqtt-python/.env.example) lists every setting. An invalid value stops the server with a `configuration error` message on stderr. `uv run mqtt-mcp --help` prints the list below.
 
 ### MQTT Connection
 
@@ -441,7 +441,7 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 
 **Issue:** a publish or command tool returns `Writes are disabled ...`
 - The server is read-only unless it is started with `MQTT_WRITES_ENABLED=true` in its real environment or an `--env-file` (see [Read-only by default](#read-only-by-default))
-- If you put `MQTT_WRITES_ENABLED=true` in a `.env` next to the server, it is ignored on purpose; stderr says `Ignoring MQTT_WRITES_ENABLED ...`. Set it in the MCP client's `env` block or pass the file with `--env-file`
+- If you put `MQTT_WRITES_ENABLED=true` in `mqtt-python/.env`, it is ignored on purpose; stderr says `Ignoring MQTT_WRITES_ENABLED ...`. A `.env` anywhere else (for example in your project's directory) is not read at all. Set it in the MCP client's `env` block or pass the file with `--env-file`
 
 ### No Devices Appearing
 
@@ -469,7 +469,7 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 
 ## Security
 
-The server is read-only unless `MQTT_WRITES_ENABLED=true` is set in its real environment or an explicit `--env-file` (a `.env` it finds by itself cannot enable writes). It sends each publish at most once and reports `meta.outcome: "unknown"` when it cannot tell whether a message got through. It supports TLS (`mqtts://`) with certificate verification, mutual TLS, and username/password authentication. For production use:
+The server is read-only unless `MQTT_WRITES_ENABLED=true` is set in its real environment or an explicit `--env-file` (the automatic `mqtt-python/.env` cannot enable writes, and no `.env` is read from the working directory). Every tool call has an overall deadline. It sends each publish at most once and reports `meta.outcome: "unknown"` when it cannot tell whether a message got through. It supports TLS (`mqtts://`) with certificate verification, mutual TLS, and username/password authentication. For production use:
 - Use a production MQTT broker with authentication and TLS
 - Give the server's MQTT account ACLs that allow exactly the topics you intend; the broker is the only place to limit what it can read and, with writes enabled, publish
 - Enable writes only where an agent is meant to change things

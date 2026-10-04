@@ -29,6 +29,8 @@ uv run mqtt-mock-server
 
 ## Configuration
 
+`uv run mqtt-mock-server --help` shows the options. `--exit-on-stdin-eof` makes the mock shut down when its stdin closes; test harnesses use it so that the mock never outlives a killed parent.
+
 Environment variables (read when the mock starts):
 
 - `MQTT_BROKER_HOST` - Broker address (default: `127.0.0.1`)

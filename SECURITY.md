@@ -23,14 +23,22 @@ supports:
   `$SYS/`), such as shared (`$share/`, `$queue/`) and exclusive (`$exclusive/`)
   subscriptions, change what other clients receive and are refused while
   writes are off.
-- **The write gate never comes from an implicit `.env`.** `MQTT_WRITES_ENABLED`
-  counts only from the server's real environment or a file passed explicitly
-  with `--env-file`. When the server is launched directly, its working
-  directory is usually the MCP client's project, which may not be trusted; a
-  `.env` found there (or in a parent directory) may set connection settings,
-  but `MQTT_WRITES_ENABLED` in it, in any letter case and with or without
-  `export `, is ignored with a warning on stderr. Note that such a file can
-  still point the server at a different broker.
+- **The write gate never comes from an implicit `.env`, and the working
+  directory is never searched.** `MQTT_WRITES_ENABLED` counts only from the
+  server's real environment or a file passed explicitly with `--env-file`.
+  When the server is launched directly, its working directory is usually the
+  MCP client's project, which may not be trusted, and settings such as the
+  broker URL decide where a write goes; so the server never reads a `.env`
+  from its working directory or any parent. The only automatic file is
+  `mqtt-python/.env` of a source checkout (found next to the package source;
+  an installed package has none). Even that file may set only `MQTT_*` and
+  `SPARKPLUG_*` variables: `MQTT_WRITES_ENABLED` (in any letter case, with or
+  without `export `) and anything else (`PATH`, `PYTHONPATH`, `LD_PRELOAD`,
+  `DYLD_*`, ...) are ignored with a warning on stderr.
+- **No call hangs.** Every broker wait is bounded by `MQTT_TOOL_TIMEOUT`, and
+  every tool call by an overall deadline (8 x `MQTT_TOOL_TIMEOUT` + 2 s). A
+  write that runs out of time is reported as `meta.outcome: "unknown"`; a
+  read returns a clean error.
 - **At most once.** The server never sends a publish or command a second time.
   When a confirmation is late or lost it withdraws the message from the MQTT
   client's queue and reports `success: false` with `meta.outcome: "unknown"`
