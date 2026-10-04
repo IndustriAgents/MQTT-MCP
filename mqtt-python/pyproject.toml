@@ -11,9 +11,9 @@ dependencies = [
     "mcp[cli]>=1.12,<2",
     # The client uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
     "paho-mqtt>=2.0,<3",
-    # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode), so any
-    # runtime with message_factory.GetMessageClass works.
-    "protobuf>=4.24",
+    # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode); 5.27 is the
+    # oldest runtime that loads on Python 3.14 (checked by CI's lowest-direct job).
+    "protobuf>=5.27",
     "python-dotenv>=1.0",
 ]
 

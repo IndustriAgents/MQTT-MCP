@@ -12,7 +12,10 @@ The difference is how the schema gets into Python. A protoc-generated
 ``*_pb2.py`` is tied to the protoc release that wrote it: newer protobuf
 runtimes warn about older generated code and eventually refuse it. Here the
 ``FileDescriptorProto`` is built in Python at import time, which works with
-every protobuf runtime from 4.24 on (the floor declared in pyproject.toml).
+every protobuf runtime from 5.27 on (the floor declared in pyproject.toml:
+older upb runtimes do not load on Python 3.14, and 4.24 crashes when two
+private pools hold this file, as when the server and mock copies share a
+process).
 The descriptor lives in a private pool, so it cannot clash with another copy
 of the Sparkplug schema loaded into the default pool by some other package.
 
