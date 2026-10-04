@@ -624,7 +624,14 @@ class MQTTClientManager:
             }
         withdrawn = self._finish(info.mid)
         if withdrawn is True and (problem == "connection lost" or self.generation == generation):
-            raise PublishError(f"{problem} before it was written; nothing was sent")
+            if problem == "connection lost":
+                raise PublishError(
+                    "the connection was lost before it was written; nothing was sent"
+                )
+            raise PublishError(
+                f"it was not on the network by the call's deadline ({problem}); it was withdrawn"
+                " and nothing was sent"
+            )
         what = (
             "was not confirmed as written"
             if qos == 0
