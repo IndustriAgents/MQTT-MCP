@@ -620,3 +620,99 @@ async def test_stop_waits_for_a_running_session_restart(monkeypatch):
     assert manager._restart_task.done()  # stop() did not leave it running
     with pytest.raises(mqtt_server.PublishError):
         await restart  # it saw closing and did not reconnect
+
+
+def _cancel_request_now():
+    """What RequestResponder.cancel() does synchronously: cancel the request's scope.
+
+    The reply ("Request cancelled") is sent from a task, as cancel() does after
+    its first await; the caller continues in the same loop step, like a task
+    whose wait (lock, connection) has just completed.
+    """
+    context = mqtt_server.mcp._mcp_server.request_context
+    responder = context.session._in_flight[context.request_id]
+    responder._cancel_scope.cancel()
+    asyncio.get_running_loop().create_task(responder.cancel())
+
+
+async def test_the_mcp_request_cancel_scope_is_captured(monkeypatch):
+    """Fails if the mcp internals the cancel check relies on move (mcp<2 is pinned)."""
+    from mcp.shared.session import RequestResponder
+
+    seen = []
+
+    async def record(self):
+        seen.append(mqtt_server._send_state.get().request_scope)
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", record)
+    monkeypatch.setattr(mqtt_server._Client, "publish", lambda *a, **k: mqtt.MQTTMessageInfo(1))
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        await call(session, "publish_message", topic="a/b", payload="x", qos=1)
+    assert len(seen) == 1
+    assert isinstance(seen[0], anyio.CancelScope)
+    assert seen[0].cancel_called is False
+    assert "_cancel_scope" in RequestResponder.__init__.__code__.co_names
+
+
+async def test_a_cancel_in_the_same_step_as_the_connection_never_reaches_paho(monkeypatch):
+    """The cancel race: the connection wait completes and the client's cancel arrives
+    in the same loop step; anyio would not interrupt before the hand-over to paho."""
+    from mcp.shared.exceptions import McpError
+
+    handed = []
+
+    async def connected_then_cancelled(self):
+        _cancel_request_now()  # no checkpoint follows: the task runs on
+
+    def spy(self, topic, payload=None, qos=0, retain=False, properties=None):
+        handed.append(topic)
+        info = mqtt.MQTTMessageInfo(1)
+        info.rc = mqtt.MQTT_ERR_NO_CONN
+        return info
+
+    monkeypatch.setattr(
+        mqtt_server.MQTTClientManager, "require_connection", connected_then_cancelled
+    )
+    monkeypatch.setattr(mqtt_server._Client, "publish", spy)
+    calls = [
+        ("publish_message", {"topic": "a/b", "payload": "x", "qos": 1}),
+        ("publish_message", {"topic": "a/b", "payload": "x", "qos": 0}),
+        ("publish_device_command", {"edge_node_id": "n", "device_id": "d", "metrics": METRIC}),
+        ("publish_node_command", {"edge_node_id": "n", "metrics": METRIC}),
+    ]
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        with anyio.fail_after(60):
+            for _ in range(10):
+                for name, arguments in calls:
+                    with pytest.raises(McpError, match="cancelled"):
+                        await session.call_tool(name, arguments)
+                    await session.send_ping()  # one reply only: the server is still fine
+            info = await call(session, "get_broker_info")
+    assert handed == []
+    assert info["success"] is True
+
+
+async def test_a_call_that_finishes_after_its_cancel_does_not_reply_twice(monkeypatch, caplog):
+    """The SDK replied "Request cancelled" (RequestResponder.cancel()); the tool then
+    finishes anyway. A second reply would crash the SDK's task group; the outcome
+    goes to stderr and the server keeps answering."""
+    from mcp.shared.exceptions import McpError
+
+    async def written_then_cancelled(self, topic, payload, qos=0, retain=False, **kwargs):
+        _cancel_request_now()
+        return {"mid": 1, "generation": self.generation, "delivery": "x"}
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", written_then_cancelled)
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        with anyio.fail_after(30), caplog.at_level("WARNING", logger="mqtt_mcp"):
+            for _ in range(5):
+                with pytest.raises(McpError, match="cancelled"):
+                    await session.call_tool(
+                        "publish_message", {"topic": "a/b", "payload": "x", "qos": 1}
+                    )
+                await session.send_ping()
+            info = await call(session, "get_broker_info")
+    assert info["success"] is True
+    assert any(
+        "cancelled by the MCP client but finished: written" in r.message for r in caplog.records
+    )

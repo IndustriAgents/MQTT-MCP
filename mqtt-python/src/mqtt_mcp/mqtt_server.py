@@ -154,6 +154,33 @@ class SendState:
     #: The call's one absolute deadline (time.monotonic()); every wait in the call
     #: (connection, session restart, acknowledgement) uses what is left of it.
     deadline: float | None = None
+    #: The MCP request's own cancel scope. RequestResponder.cancel() sets its
+    #: cancel_called synchronously, but anyio does not interrupt a task whose wait
+    #: has just completed, so the pre-send check reads the flag itself.
+    request_scope: Any = None
+
+    def cancel_requested(self) -> bool:
+        """The MCP client cancelled this call (the SDK has already replied)."""
+        return self.request_scope is not None and bool(self.request_scope.cancel_called)
+
+    def deadline_passed(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+
+async def _end_as_cancelled(message: str) -> None:
+    """End a call the MCP client has cancelled, as a real cancellation.
+
+    The SDK has already answered "Request cancelled"; a second answer (an
+    envelope) would trip its "already completed" assertion. The outcome goes to
+    stderr instead. The cancellation the SDK scheduled for this task arrives at
+    the next suspension point and is then suppressed by the SDK, as for any
+    cancelled request.
+    """
+    logger.warning("%s", message)
+    give_up = time.monotonic() + 5.0
+    while time.monotonic() < give_up:
+        await asyncio.sleep(0.01)
+    raise anyio.get_cancelled_exc_class()()
 
 
 _send_state: ContextVar[SendState | None] = ContextVar("mqtt_mcp_send_state", default=None)
@@ -574,15 +601,27 @@ class MQTTClientManager:
         assert self.client is not None
         timeout = self.time_left() if timeout is None else timeout
         state = _send_state.get()
+        cancelled = False
         with self._lock:
-            # No await between this check and the hand-over to paho.
+            # No await between these checks and the hand-over to paho. The cancel
+            # check reads the MCP request's flag: anyio does not interrupt a task
+            # whose wait has just completed, so a cancellation can be pending here.
             if self.closing and not shutdown:
                 raise PublishError(
                     "the server is shutting down (the MCP client is gone); nothing was sent"
                 )
-            generation = self.generation
-            info = self.client.publish(topic, payload, qos=qos, retain=retain)
-            self._inflight[info.mid] = _InFlight(info)
+            if state is not None and state.cancel_requested():
+                cancelled = True
+            else:
+                if state is not None and state.deadline_passed():
+                    raise PublishError("the call's deadline has passed; nothing was sent")
+                generation = self.generation
+                info = self.client.publish(topic, payload, qos=qos, retain=retain)
+                self._inflight[info.mid] = _InFlight(info)
+        if cancelled:
+            await _end_as_cancelled(
+                f"Publish to {topic!r}: the MCP client cancelled the call; nothing was sent"
+            )
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             # Nothing was written (no connection); QoS 1/2 would be queued for later.
             if self._finish(info.mid) is not False:
@@ -734,12 +773,12 @@ class MQTTClientManager:
         client is never left half-restarted; ``stop()`` waits for it. It does not
         reconnect once ``closing`` is set.
         """
-        self._restart_task = asyncio.ensure_future(self._restart(bd_seq))
+        self._restart_task = asyncio.ensure_future(self._restart(bd_seq, _send_state.get()))
         # Its error is reported to the caller; if the caller is gone, swallow it here.
         self._restart_task.add_done_callback(lambda t: t.cancelled() or t.exception())
         await asyncio.shield(self._restart_task)
 
-    async def _restart(self, bd_seq: int | None) -> None:
+    async def _restart(self, bd_seq: int | None, state: SendState | None = None) -> None:
         assert self.client is not None
         if self.closing:
             raise PublishError("the server is shutting down; the session was not restarted")
@@ -753,6 +792,14 @@ class MQTTClientManager:
         with self._lock:
             if self.closing:  # checked under the lock, right before reconnecting
                 raise PublishError("the server is shutting down; the session was not restarted")
+            cancelled = None
+            if state is not None and payload is not None:
+                if state.cancel_requested():
+                    cancelled = "the MCP client cancelled the call"
+                elif state.deadline_passed():
+                    cancelled = "the call's deadline has passed"
+            if cancelled is not None:
+                payload = None  # the birth was called off: reconnect, but without a will
             if payload is None:
                 self.client.will_clear()
                 self._will_bd_seq = None
@@ -766,6 +813,8 @@ class MQTTClientManager:
                 self.settings.host, self.settings.port, keepalive=self.settings.keepalive
             )
             self.client.loop_start()
+        if cancelled is not None:
+            raise PublishError(f"{cancelled}; no NDEATH will was registered")
         wanted = (
             (lambda: self.connected and self.will_active) if payload else (lambda: self.connected)
         )
@@ -949,7 +998,9 @@ class EnvelopeFastMCP(FastMCP):
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
         deadline = call_deadline(get_settings())
-        state = SendState(deadline=time.monotonic() + deadline)
+        state = SendState(
+            deadline=time.monotonic() + deadline, request_scope=self._request_cancel_scope()
+        )
         token = _send_state.set(state)
         try:
             with anyio.CancelScope() as scope:
@@ -958,9 +1009,22 @@ class EnvelopeFastMCP(FastMCP):
                     if self.client_gone:
                         scope.cancel()
                         await anyio.lowlevel.checkpoint()
-                    return await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         self._call_enveloped(name, arguments), deadline + _REPORT_GRACE
                     )
+                    if state.cancel_requested():
+                        # The SDK has already replied "Request cancelled": a second
+                        # reply would crash its task group. Log what happened instead.
+                        envelope = result[1] if isinstance(result, tuple) else result
+                        outcome = (
+                            envelope.get("meta", {}).get("outcome", envelope.get("success"))
+                            if isinstance(envelope, dict)
+                            else "a result"
+                        )
+                        await _end_as_cancelled(
+                            f"{name} was cancelled by the MCP client but finished: {outcome}"
+                        )
+                    return result
                 except asyncio.TimeoutError:
                     return self._ended_early(
                         name, state, f"did not finish within its deadline of {deadline:g}s"
@@ -971,6 +1035,16 @@ class EnvelopeFastMCP(FastMCP):
             return self._ended_early(name, state, "was cancelled: the MCP client disconnected")
         finally:
             _send_state.reset(token)
+
+    def _request_cancel_scope(self) -> Any:
+        """The cancel scope of the MCP request being served (mcp<2 internals, hence
+        the pin; a test fails if they move), or None outside a request."""
+        try:
+            context = self._mcp_server.request_context
+            responder = context.session._in_flight.get(context.request_id)
+        except (LookupError, AttributeError):
+            return None
+        return getattr(responder, "_cancel_scope", None)
 
     def _ended_early(self, name: str, state: SendState, why: str) -> dict[str, Any]:
         if name not in WRITE_TOOLS:

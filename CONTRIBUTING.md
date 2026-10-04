@@ -162,7 +162,9 @@ pull request and describe the bench you used.
   or lost; report `meta.outcome: "unknown"` with `meta.request_sent: true`.
   A call that ends early (deadline, client cancel, client gone) must withdraw
   its message from paho's queues before the cancellation propagates; check
-  the server's closing flag right before handing a message to paho.
+  the server's closing flag and the MCP request's `cancel_called` right before
+  handing a message to paho. A cancelled call must end as a cancellation, never
+  with an envelope (the SDK has already replied).
   Only connecting may be retried.
 - Arguments are strictly typed (`StrictInt`, `StrictBool`): never accept a
   boolean as a number.

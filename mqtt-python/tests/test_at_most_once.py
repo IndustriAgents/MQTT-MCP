@@ -279,3 +279,49 @@ async def test_the_client_disconnecting_cancels_running_calls_at_once(
     status = await asyncio.to_thread(srv.wait_exit, 40)
     assert time.monotonic() - closed_at < 8  # not after the 30 s deadline
     assert status == 0, srv.stderr()
+
+
+async def test_a_cancel_racing_the_hand_over_never_reaches_the_broker(
+    broker, observer, monkeypatch
+):
+    """The cancel race against a real broker: the connection check completes and the
+    request is cancelled in the same loop step, 60 times; nothing may arrive."""
+    from mcp.shared.exceptions import McpError
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    from mqtt_mcp import mqtt_server
+    from mqtt_mcp.config import load_settings
+
+    from .test_tools import _cancel_request_now
+
+    topic = f"itest-once/{unique('race')}"
+    observer.subscribe(f"{topic}/#")
+    real_require = mqtt_server.MQTTClientManager.require_connection
+
+    async def connected_then_cancelled(self):
+        await real_require(self)  # already connected: returns without a checkpoint
+        _cancel_request_now()
+
+    monkeypatch.setattr(
+        mqtt_server.MQTTClientManager, "require_connection", connected_then_cancelled
+    )
+    mqtt_server.set_settings(
+        load_settings({"MQTT_BROKER_URL": broker.url, "MQTT_WRITES_ENABLED": "true"})
+    )
+    try:
+        async with create_connected_server_and_client_session(
+            mqtt_server.mcp._mcp_server
+        ) as session:
+            with anyio.fail_after(120):
+                for i in range(30):
+                    for qos in (0, 1):
+                        with pytest.raises(McpError, match="cancelled"):
+                            await session.call_tool(
+                                "publish_message",
+                                {"topic": f"{topic}/{i}-{qos}", "payload": "never", "qos": qos},
+                            )
+                await session.send_ping()
+            await asyncio.sleep(1.5)
+    finally:
+        mqtt_server.set_settings(None)
+    assert observer.find(lambda m: m.topic.startswith(topic)) == []

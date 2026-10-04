@@ -51,7 +51,10 @@ supports:
   server gives the message up before the MQTT client could resend it on
   reconnect, so it is not delivered twice.
 - **Nothing is sent after the client is gone.** A call the MCP client cancels
-  is withdrawn if its message is not yet on the socket. When stdin closes,
+  is withdrawn if its message is not yet on the socket. The last check before
+  a message is handed to the MQTT client reads the MCP request's cancel flag
+  itself, so a cancel that arrives in the same instant a wait completes (which
+  the async runtime would not interrupt) still stops the send. When stdin closes,
   the server cancels every running call, publishes nothing more (except the
   NDEATH of a node it has born), and exits.
 - **TLS for `mqtts://` URLs.** The broker certificate is verified against the
