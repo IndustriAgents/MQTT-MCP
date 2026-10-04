@@ -78,17 +78,29 @@ def merge_env_file(env_file: str | None = None, environ=None) -> list[str]:
             return []
     warnings = []
     for key, value in dotenv_values(path).items():
-        if value is None or key in environ:
-            continue
-        if key in GATE_VARS and not explicit:
+        name = _normalise(key)
+        if name in GATE_VARS and not explicit:
+            # Matched case-insensitively: Windows upper-cases environment names, so
+            # mqtt_writes_enabled in a .env would open the gate there.
             warnings.append(
-                f"Ignoring {key} from {path}: a .env file found automatically cannot change a"
-                " safety gate. Set it in the server's real environment (for example the MCP"
-                " client's env block) or pass the file with --env-file."
+                f"Ignoring {name} (written as {key!r}) from {path}: a .env file found"
+                " automatically cannot change a safety gate. Set it in the server's real"
+                " environment (for example the MCP client's env block) or pass the file with"
+                " --env-file."
             )
+            continue
+        if value is None or key in environ:
             continue
         environ[key] = value
     return warnings
+
+
+def _normalise(key: str) -> str:
+    """A .env key as the environment would see it: no 'export ' prefix, upper case."""
+    name = key.strip()
+    if name.lower().startswith("export "):
+        name = name[len("export ") :].strip()
+    return name.upper()
 
 
 @dataclass(frozen=True)

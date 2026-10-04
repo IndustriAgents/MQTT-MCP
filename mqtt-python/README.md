@@ -30,7 +30,7 @@ uv run mqtt-mcp
 
 The server then waits silently for an MCP client on stdin: it speaks MCP (JSON-RPC) on stdio and logs to stderr. Normally your MCP client starts it (see [Usage with Claude Desktop](#usage-with-claude-desktop)); to try it by hand, run `npx @modelcontextprotocol/inspector uv --directory mqtt-python run mqtt-mcp` from the repository root. `uv run mqtt-mcp --help` lists the settings and `--version` prints the version.
 
-At startup the server merges a `.env` file into the environment: the one given with `--env-file PATH`, or else the nearest `.env` in the working directory or a parent. Variables already set in the environment take precedence. An automatically found `.env` may set connection settings but not `MQTT_WRITES_ENABLED`: that is ignored with a warning on stderr, because the working directory is often the MCP client's project. Only the real environment or `--env-file` can enable writes. [`.env.example`](.env.example) lists every setting. An invalid setting stops the server with a `configuration error` on stderr (exit code 2).
+At startup the server merges a `.env` file into the environment: the one given with `--env-file PATH`, or else the nearest `.env` in the working directory or a parent. Variables already set in the environment take precedence. An automatically found `.env` may set connection settings but not `MQTT_WRITES_ENABLED` (matched in any letter case, with or without `export `): that is ignored with a warning on stderr, because the working directory is often the MCP client's project. Only the real environment or `--env-file` can enable writes. [`.env.example`](.env.example) lists every setting. An invalid setting stops the server with a `configuration error` on stderr (exit code 2).
 
 ## Configuration
 
@@ -54,7 +54,7 @@ Environment variables:
 
 Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta": {...} }`. Invalid arguments come back as `success: false` with the reason; types are strict (`true` is not a number, `1` is not a boolean).
 
-Write tools add `meta.outcome` (`written`, `not_sent`, `unknown`; `rejected` never occurs with MQTT 3.1.1) and `meta.request_sent`. Each publish goes out at most once: a late or lost confirmation is reported as `unknown` ("may have been applied; check before retrying"), never retried, and withdrawn from the client's queue.
+Write tools add `meta.outcome` (`written`, `not_sent`, `unknown`; `rejected` would need an explicit broker refusal, which MQTT 3.1.1 does not have) and `meta.request_sent`. Once a message may have left, a failure is `unknown`, never `not_sent`; and `written` for QoS 0 only means written to the network, its effect is unknown. Each publish goes out at most once: a late or lost confirmation is reported as `unknown` ("may have been applied; check before retrying"), never retried, and withdrawn from the client's queue.
 
 ### Read-only tools
 

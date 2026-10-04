@@ -354,3 +354,29 @@ def test_refused_connect_keeps_the_will_for_the_next_attempt():
     # Deaths published while this server was away are missed: online is now unknown.
     assert manager.registry.snapshot()[0]["online"] is None
     assert client._will is False  # the broker published it; the next birth needs a new one
+
+
+async def test_message_written_before_a_drop_is_unknown(monkeypatch):
+    """Sent, then the connection dropped: never reported as written or not_sent."""
+
+    async def will_registered(self, bd_seq):
+        self.connected, self.will_active, self.bd_seq = True, True, bd_seq
+
+    async def connected(self):
+        return None
+
+    async def written_then_dropped(self, *args, **kwargs):
+        result = {"mid": 1, "generation": self.generation, "delivery": "x"}
+        self.generation += 1  # a reconnect happened right after the write
+        return result
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_restart_with_will", will_registered)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", written_then_dropped)
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        result = await call(session, "publish_node_birth", metrics=[])
+        info = await call(session, "get_broker_info")
+    assert result["success"] is False
+    assert result["meta"] == {"outcome": "unknown", "request_sent": True}
+    assert "may have been applied; check before retrying" in result["error"]
+    assert info["data"]["sparkplug"]["node_born"] is False

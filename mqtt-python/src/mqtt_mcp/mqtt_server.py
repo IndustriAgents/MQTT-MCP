@@ -481,9 +481,11 @@ class MQTTClientManager:
                 "mid": info.mid,
                 "generation": generation,
                 "delivery": (
-                    "written to the network (QoS 0: the broker does not acknowledge)"
+                    "written to the network; QoS 0 is not acknowledged, so whether it reached"
+                    " the broker or had any effect on a device is unknown"
                     if qos == 0
-                    else f"acknowledged by the broker ({'PUBACK' if qos == 1 else 'PUBCOMP'})"
+                    else f"acknowledged by the broker ({'PUBACK' if qos == 1 else 'PUBCOMP'});"
+                    " whether it had any effect on a device is not known"
                 ),
             }
         withdrawn = self._withdraw(info.mid)
@@ -1027,9 +1029,10 @@ async def _publish_edge(
     m.seq = seq
     if m.generation != result["generation"] or not m.will_active:
         raise PublishError(
-            f"{message_type} was written, but the connection dropped right after it: the broker"
-            " has published the NDEATH will, so the node is dead. publish_node_birth again.",
-            outcome="written",
+            f"{message_type} was written to the network, but the connection dropped right after"
+            " it, so the broker may not have received it (QoS 0), and it has published the"
+            f" NDEATH will: the node is dead; publish_node_birth again. {UNKNOWN_HINT}",
+            outcome="unknown",
             request_sent=True,
         )
     return {

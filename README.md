@@ -163,10 +163,10 @@ Write tools also report what is known about the request in `meta.outcome` and `m
 
 | `meta.outcome` | `success` | Meaning |
 |----------------|-----------|---------|
-| `written` | `true` | Sent: QoS 0 written to the network, QoS 1/2 acknowledged by the broker |
+| `written` | `true` | Sent: QoS 0 written to the network, QoS 1/2 acknowledged by the broker. Whether it had any effect on a device is not known (for QoS 0 not even whether the broker got it); read the device's data to confirm |
 | `not_sent` | `false` | Nothing left the server (write gate closed, invalid argument, not connected, or withdrawn before it was written) |
-| `unknown` | `false` | It may have reached the broker (for example no PUBACK in time). The error says "may have been applied; check before retrying" |
-| `rejected` | `false` | Never reported: an MQTT 3.1.1 broker has no way to reject a publish |
+| `unknown` | `false` | It may have reached the broker: any failure once the message may have left (no PUBACK in time, connection dropped right after the write, a partly written packet). The error says "may have been applied; check before retrying" |
+| `rejected` | `false` | Only for an explicit refusal that guarantees nothing was applied (for MQTT 5, a PUBACK with a failure reason code). MQTT 3.1.1, which this server speaks, has no such refusal, so it is never reported |
 
 The server sends every publish and command **at most once**. Only connecting is retried; a publish whose confirmation is late or lost is never sent again by the server, and it is withdrawn from the MQTT client's queue so that it cannot go out after a reconnect. Two protocol facts remain: QoS 1 is at-least-once, so if the connection drops before the PUBACK *while the tool is still waiting*, the MQTT client resends it (flagged as a duplicate) and subscribers may get it twice; and a broker that silently drops a publish its ACL forbids (Mosquitto does) still acknowledges it, so `written` means the broker took it, not that anyone received it.
 
@@ -189,7 +189,7 @@ The server sends every publish and command **at most once**. Only connecting is 
 
 The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscribing and reading are not writes: they change nothing that other clients see. The exceptions are broker extensions in filters that start with `$` (other than `$SYS/`): shared subscriptions (`$share/...`, `$queue/...`) take messages away from the other members of the share group, and exclusive ones (`$exclusive/...`) lock other clients out of a topic, so they are refused while writes are disabled.
 
-`MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. A `.env` file that the server finds by itself in its working directory, which is often the MCP client's project, may set connection settings but cannot enable writes: the server ignores `MQTT_WRITES_ENABLED` from it and logs a warning on stderr.
+`MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. A `.env` file that the server finds by itself in its working directory, which is often the MCP client's project, may set connection settings but cannot enable writes: the server ignores `MQTT_WRITES_ENABLED` from it and logs a warning on stderr. The name is matched case-insensitively and with or without an `export ` prefix (Windows upper-cases environment names, so `mqtt_writes_enabled=true` would otherwise count there).
 
 ### Standard MQTT
 

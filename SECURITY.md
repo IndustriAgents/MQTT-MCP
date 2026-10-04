@@ -28,13 +28,17 @@ supports:
   with `--env-file`. When the server is launched directly, its working
   directory is usually the MCP client's project, which may not be trusted; a
   `.env` found there (or in a parent directory) may set connection settings,
-  but `MQTT_WRITES_ENABLED` in it is ignored with a warning on stderr. Note
-  that such a file can still point the server at a different broker.
+  but `MQTT_WRITES_ENABLED` in it, in any letter case and with or without
+  `export `, is ignored with a warning on stderr. Note that such a file can
+  still point the server at a different broker.
 - **At most once.** The server never sends a publish or command a second time.
   When a confirmation is late or lost it withdraws the message from the MQTT
   client's queue and reports `success: false` with `meta.outcome: "unknown"`
   and `meta.request_sent: true` ("may have been applied; check before
-  retrying"). QoS 1 remains at-least-once at the protocol level: if the
+  retrying"). Once a message may have left, a failure is never reported as
+  `not_sent`. Even a successful QoS 0 publish only means it was written to the
+  network: whether it arrived or changed anything is unknown until the device
+  reports it. QoS 1 remains at-least-once at the protocol level: if the
   connection drops before the PUBACK while the tool is still waiting, the MQTT
   client resends it.
 - **TLS for `mqtts://` URLs.** The broker certificate is verified against the

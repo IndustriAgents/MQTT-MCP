@@ -157,6 +157,9 @@ async def test_writes_commands_edge_node_and_will(
             ],
         )
         assert command["success"] is True
+        assert command["meta"]["outcome"] == "written"
+        assert command["meta"]["request_sent"] is True
+        assert "had any effect on a device is unknown" in command["data"]["delivery"]
         assert command["data"]["topic"] == f"spBv1.0/{group}/DCMD/edge-node-1/device-2"
 
         async def pump_running():

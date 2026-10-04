@@ -240,3 +240,25 @@ def test_merge_env_file_without_touching_os_environ(tmp_path, monkeypatch):
     assert environ == {"MQTT_WRITES_ENABLED": "1", "MQTT_KEEPALIVE": "30"}
     with pytest.raises(ConfigError, match="does not exist"):
         merge_env_file(str(tmp_path / "missing.env"), {})
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "mqtt_writes_enabled=true",
+        "Mqtt_Writes_Enabled=true",
+        "export MQTT_WRITES_ENABLED=true",
+        "export mqtt_writes_enabled='true'",
+        '  MQTT_WRITES_ENABLED = "yes"',
+    ],
+)
+def test_implicit_dotenv_gate_is_matched_case_insensitively(tmp_path, monkeypatch, line):
+    """Windows upper-cases environment names: any spelling of the gate is refused."""
+    from mqtt_mcp.config import merge_env_file
+
+    (tmp_path / ".env").write_text(line + "\nMQTT_KEEPALIVE=30\n")
+    monkeypatch.chdir(tmp_path)
+    environ: dict[str, str] = {}
+    warnings = merge_env_file(None, environ)
+    assert environ == {"MQTT_KEEPALIVE": "30"}
+    assert len(warnings) == 1 and "Ignoring MQTT_WRITES_ENABLED" in warnings[0]
