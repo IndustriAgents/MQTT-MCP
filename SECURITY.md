@@ -35,10 +35,11 @@ supports:
   `SPARKPLUG_*` variables: `MQTT_WRITES_ENABLED` (in any letter case, with or
   without `export `) and anything else (`PATH`, `PYTHONPATH`, `LD_PRELOAD`,
   `DYLD_*`, ...) are ignored with a warning on stderr.
-- **No call hangs.** Every broker wait is bounded by `MQTT_TOOL_TIMEOUT`, and
-  every tool call by an overall deadline (8 x `MQTT_TOOL_TIMEOUT` + 2 s). A
-  write that runs out of time is reported as `meta.outcome: "unknown"`; a
-  read returns a clean error.
+- **No call hangs.** Every tool call has one deadline, `MQTT_TOOL_TIMEOUT`
+  (default 10 s, at most 50 s), counted from its start and shared by every
+  step (connection, session restart, acknowledgement). A write whose deadline
+  passes before it is on the socket is withdrawn and reported as `not_sent`,
+  one that may have left as `unknown`; a read returns a clean error.
 - **At most once.** The server never sends a publish or command a second time.
   When a confirmation is late or lost it withdraws the message from the MQTT
   client's queue and reports `success: false` with `meta.outcome: "unknown"`
@@ -46,9 +47,13 @@ supports:
   retrying"). Once a message may have left, a failure is never reported as
   `not_sent`. Even a successful QoS 0 publish only means it was written to the
   network: whether it arrived or changed anything is unknown until the device
-  reports it. QoS 1 remains at-least-once at the protocol level: if the
-  connection drops before the PUBACK while the tool is still waiting, the MQTT
-  client resends it.
+  reports it. If the connection drops while a call waits for a PUBACK, the
+  server gives the message up before the MQTT client could resend it on
+  reconnect, so it is not delivered twice.
+- **Nothing is sent after the client is gone.** A call the MCP client cancels
+  is withdrawn if its message is not yet on the socket. When stdin closes,
+  the server cancels every running call, publishes nothing more (except the
+  NDEATH of a node it has born), and exits.
 - **TLS for `mqtts://` URLs.** The broker certificate is verified against the
   system trust store or `MQTT_TLS_CA_FILE`, including the hostname. Mutual TLS
   works with `MQTT_TLS_CERT_FILE`/`MQTT_TLS_KEY_FILE`. `MQTT_TLS_INSECURE=true`

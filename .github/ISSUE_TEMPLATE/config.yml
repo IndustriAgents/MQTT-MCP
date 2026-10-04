@@ -10,5 +10,5 @@ contact_links:
     url: https://modelcontextprotocol.io
     about: Reference for MCP itself — transports, clients, and the tool interface.
   - name: Security vulnerability
-    url: https://github.com/IndustriAgents/MQTT-MCP/security/policy
+    url: https://github.com/IndustriAgents/MQTT-MCP/security/advisories/new
     about: Report privately. Please do not open a public issue.

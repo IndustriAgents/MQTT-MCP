@@ -153,13 +153,16 @@ pull request and describe the bench you used.
 - The write gate is read only from the real environment or `--env-file`,
   never from the automatic `mqtt-python/.env`; no `.env` is ever read from the
   working directory, and the automatic one may set only `MQTT_*`/`SPARKPLUG_*`.
-- Every broker wait is bounded, and every tool call has an overall deadline;
-  nothing may hang without an outcome.
+- Every tool call has one absolute deadline (`MQTT_TOOL_TIMEOUT`); each step
+  waits only for what is left of it. Nothing may hang without an outcome.
 - Test helpers that start processes (mock, broker) must stop them when pytest
   dies: the mock runs with `--exit-on-stdin-eof`, other helpers through
   `tests/watchdog.py`.
 - A publish is sent at most once. Never retry one whose confirmation is late
   or lost; report `meta.outcome: "unknown"` with `meta.request_sent: true`.
+  A call that ends early (deadline, client cancel, client gone) must withdraw
+  its message from paho's queues before the cancellation propagates; check
+  the server's closing flag right before handing a message to paho.
   Only connecting may be retried.
 - Arguments are strictly typed (`StrictInt`, `StrictBool`): never accept a
   boolean as a number.

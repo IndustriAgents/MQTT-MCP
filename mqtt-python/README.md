@@ -45,18 +45,18 @@ Environment variables:
 - `MQTT_TLS_CERT_FILE` / `MQTT_TLS_KEY_FILE` / `MQTT_TLS_KEY_PASSWORD` - Client certificate for mutual TLS
 - `MQTT_TLS_INSECURE` - `true` disables certificate and hostname verification (testing only)
 - `MQTT_WRITES_ENABLED` - `true` enables the publishing tools and `$`-prefixed subscription filters (default: `false`). Only from the real environment or `--env-file`
-- `MQTT_TOOL_TIMEOUT` - Seconds to wait for the connection and broker acknowledgements (default: `5`)
+- `MQTT_TOOL_TIMEOUT` - Deadline of one tool call in seconds, shared by all its steps (default: `10`, at most `50`)
 - `MQTT_MESSAGE_BUFFER_SIZE` - Received messages kept for `read_messages` (default: `1000`)
 - `SPARKPLUG_GROUP_ID` - Sparkplug B group ID (default: `factory`)
-- `SPARKPLUG_EDGE_NODE_ID` - This server's Sparkplug B edge node ID, and the default target of NCMD/DCMD (default: `edge-node-1`)
+- `SPARKPLUG_EDGE_NODE_ID` - This server's own Sparkplug B edge node ID (default: `mqtt-mcp`)
 
 ## Tools
 
 Every tool returns `{ "success": bool, "data": ..., "error": str | null, "meta": {...} }`. Invalid arguments come back as `success: false` with the reason; types are strict (`true` is not a number, `1` is not a boolean).
 
-Every tool call has an overall deadline of 8 x `MQTT_TOOL_TIMEOUT` + 2 s (each broker wait inside is bounded by `MQTT_TOOL_TIMEOUT`); a write that runs out of time is `unknown`, a read gets a clean error.
+Every tool call has one deadline, `MQTT_TOOL_TIMEOUT` (default 10 s, at most 50 s), from its start; waiting for the connection, a session restart and the broker's acknowledgement all share it. A write not on the socket by then is withdrawn (`not_sent`) and never sent later; one that may have left is `unknown`; a read gets a clean error. The same applies when the MCP client cancels a call or disconnects: when stdin closes, every running call is cancelled, nothing more is published and the server exits with status 0.
 
-Write tools add `meta.outcome` (`written`, `not_sent`, `unknown`; `rejected` would need an explicit broker refusal, which MQTT 3.1.1 does not have) and `meta.request_sent`. Once a message may have left, a failure is `unknown`, never `not_sent`; and `written` for QoS 0 only means written to the network, its effect is unknown. Each publish goes out at most once: a late or lost confirmation is reported as `unknown` ("may have been applied; check before retrying"), never retried, and withdrawn from the client's queue.
+Write tools add `meta.outcome` (`written`, `not_sent`, `unknown`; `rejected` would need an explicit broker refusal, which MQTT 3.1.1 does not have) and `meta.request_sent`. Once a message may have left, a failure is `unknown`, never `not_sent`; and `written` for QoS 0 only means written to the network, its effect is unknown. Each publish goes out at most once: a late or lost confirmation is reported as `unknown` ("may have been applied; check before retrying"), never retried, and withdrawn from the client's queue; if the connection drops while a call waits for its PUBACK, the message is given up before the MQTT client could resend it on reconnect.
 
 ### Read-only tools
 
@@ -113,19 +113,19 @@ Publish UTF-8 text. Success means: QoS 0 written to the network; QoS 1/2 acknowl
 Send NCMD / DCMD (QoS 0, no `seq`, as Sparkplug requires). Success means the command was sent, not that the node applied it.
 
 **Parameters:**
+- `edge_node_id` (string, required) - Target edge node (there is no default target)
 - `device_id` (string, required for DCMD) - Target device
 - `metrics` (array, required) - At least one metric
-- `edge_node_id` (string, optional) - Target edge node (default: `SPARKPLUG_EDGE_NODE_ID`)
 - `group_id` (string, optional) - Target group (default: `SPARKPLUG_GROUP_ID`)
 
 #### `publish_node_birth`
-Make this server the edge node `SPARKPLUG_GROUP_ID`/`SPARKPLUG_EDGE_NODE_ID` and publish its NBIRTH (`seq` 0, with `bdSeq` and `Node Control/Rebirth` added). The first birth on a connection reconnects with an NDEATH Last Will carrying a new bdSeq.
+Make this server the edge node `SPARKPLUG_GROUP_ID`/`SPARKPLUG_EDGE_NODE_ID` and publish its NBIRTH (`seq` 0, with `bdSeq` and `Node Control/Rebirth` added; metric names must be unique). The first birth on a connection reconnects with an NDEATH Last Will carrying a new bdSeq.
 
 **Parameters:**
 - `metrics` (array, optional) - Node metrics
 
 #### `publish_node_death`
-Publish this server's NDEATH (bdSeq, no seq, QoS 1). Needs a born node.
+Publish this server's NDEATH (bdSeq, no seq, QoS 1). Needs a born node. Afterwards the server reconnects without the will, so a later crash does not announce a second death.
 
 #### `publish_device_birth` / `publish_device_death`
 DBIRTH / DDEATH for a device of this server's node. DBIRTH needs a born node; DDEATH a device born by this server.
@@ -165,7 +165,9 @@ Add `"MQTT_WRITES_ENABLED": "true"` to `env` only if the agent may publish.
 
 ## Dependencies
 
-- `mcp[cli]>=1.12,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, so the server needs 1.x)
+- `mcp[cli]>=1.12,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, and the server uses FastMCP internals, so it needs 1.x)
+- `anyio>=4.5` - task groups and cancel scopes (stdio relay, call cancellation)
+- `pydantic>=2.8,<3` (`>=2.12` on Python 3.14) - strict argument types
 - `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
 - `protobuf>=5.27` - Protobuf runtime for the Sparkplug B schema
 - `python-dotenv>=1.0` - `.env` loading

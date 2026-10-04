@@ -168,7 +168,9 @@ Write tools also report what is known about the request in `meta.outcome` and `m
 | `unknown` | `false` | It may have reached the broker: any failure once the message may have left (no PUBACK in time, connection dropped right after the write, a partly written packet). The error says "may have been applied; check before retrying" |
 | `rejected` | `false` | Only for an explicit refusal that guarantees nothing was applied (for MQTT 5, a PUBACK with a failure reason code). MQTT 3.1.1, which this server speaks, has no such refusal, so it is never reported |
 
-The server sends every publish and command **at most once**. Only connecting is retried; a publish whose confirmation is late or lost is never sent again by the server, and it is withdrawn from the MQTT client's queue so that it cannot go out after a reconnect. Two protocol facts remain: QoS 1 is at-least-once, so if the connection drops before the PUBACK *while the tool is still waiting*, the MQTT client resends it (flagged as a duplicate) and subscribers may get it twice; and a broker that silently drops a publish its ACL forbids (Mosquitto does) still acknowledges it, so `written` means the broker took it, not that anyone received it.
+The server sends every publish and command **at most once**. Only connecting is retried. A publish whose confirmation is late or lost is never sent again: it is withdrawn from the MQTT client's queue, and if the connection drops while the call is waiting for the PUBACK, the server gives the message up before the MQTT client could resend it on reconnect (so it is not delivered twice). The same holds when the call ends early: if the MCP client cancels it, disconnects (stdin closes), or the call's deadline passes, a message that was not yet on the socket is withdrawn (`not_sent`) and never sent later; one that may have left is `unknown`. When stdin closes, every running call is cancelled at once, nothing more is published, and the server exits with status 0. One protocol fact remains: a broker that silently drops a publish its ACL forbids (Mosquitto does) still acknowledges it, so `written` means the broker took it, not that anyone received it.
+
+Every tool call has **one deadline**, `MQTT_TOOL_TIMEOUT` (default 10 s, at most 50 s), counted from the start of the call and shared by every step: waiting for the connection, the session restart of a first `publish_node_birth`, and the broker's acknowledgement. No step gets a fresh timeout, so no call can run longer or hang.
 
 | Tool | Kind | What it does |
 |------|------|--------------|
@@ -237,7 +239,7 @@ Metrics are lists of `{"name": str, "value": ..., "type": str}`; see [Data Types
 }
 ```
 
-  `edge_node_id` and `group_id` default to `SPARKPLUG_EDGE_NODE_ID` and `SPARKPLUG_GROUP_ID`. Success means the DCMD went out (QoS 0, as Sparkplug requires); whether the device applied it shows in its next DDATA.
+  `edge_node_id` is required: commands have no default target. `group_id` defaults to `SPARKPLUG_GROUP_ID`. Success means the DCMD went out (QoS 0, as Sparkplug requires); whether the device applied it shows in its next DDATA.
 
 - Ask a node to republish its births (writes enabled)
 ```json
@@ -263,7 +265,7 @@ Metrics are lists of `{"name": str, "value": ..., "type": str}`; see [Data Types
 }
 ```
 
-  The first NBIRTH makes the server reconnect with an NDEATH Last Will so that the broker announces the node's death if the server disappears. `bdSeq` and `Node Control/Rebirth` are added automatically, and the NBIRTH carries `seq` 0. DBIRTH, DDATA, NDATA and DDEATH need a born node (and DDATA/DDEATH a born device) and use the following sequence numbers. Use an `SPARKPLUG_EDGE_NODE_ID` that no real edge node uses.
+  The first NBIRTH makes the server reconnect with an NDEATH Last Will so that the broker announces the node's death if the server disappears. `bdSeq` and `Node Control/Rebirth` are added automatically, and the NBIRTH carries `seq` 0. DBIRTH, DDATA, NDATA and DDEATH need a born node (and DDATA/DDEATH a born device) and use the following sequence numbers. Metric names must be unique within a birth. After `publish_node_death` the server reconnects without the will, so a later crash does not announce a second death, and the next NBIRTH gets a new bdSeq. Use an `SPARKPLUG_EDGE_NODE_ID` that no real edge node uses (the default is `mqtt-mcp`).
 
 - Decode a Sparkplug payload (hex)
 ```json
@@ -286,7 +288,7 @@ The server reads its configuration when it starts. Before that it merges a `.env
 - `MQTT_USERNAME` - Optional username, sent with or without a password
 - `MQTT_PASSWORD` - Optional password (needs `MQTT_USERNAME`)
 - `MQTT_KEEPALIVE` - Keep-alive in seconds (default: `60`)
-- `MQTT_TOOL_TIMEOUT` - Seconds a tool waits for the connection and for broker acknowledgements (default: `5`)
+- `MQTT_TOOL_TIMEOUT` - The deadline of one tool call in seconds, from its start, shared by waiting for the connection, a session restart and the broker's acknowledgement (default: `10`, at most `50`)
 - `MQTT_MESSAGE_BUFFER_SIZE` - Received messages kept for `read_messages` (default: `1000`)
 
 ### TLS (only with `mqtts://`)
@@ -305,9 +307,9 @@ Setting a TLS variable with an `mqtt://` URL is a configuration error, so TLS ca
 ### Sparkplug B Namespace
 
 - `SPARKPLUG_GROUP_ID` - Group ID (default: `factory`)
-- `SPARKPLUG_EDGE_NODE_ID` - Edge node ID (default: `edge-node-1`)
+- `SPARKPLUG_EDGE_NODE_ID` - Edge node ID (default: `mqtt-mcp`)
 
-These are this server's own Sparkplug identity (used by the birth, data and death tools) and the default target of NCMD/DCMD. The default `edge-node-1` is also the mock's ID, which is convenient for commanding the mock; if you let the server publish births, give it an ID of its own (the examples use `mcp-server`) and pass `edge_node_id` to the command tools.
+These are this server's own Sparkplug identity, used by the birth, data and death tools. The default `mqtt-mcp` is deliberately not the mock's `edge-node-1` or a typical plant name. NCMD/DCMD always name their target with `edge_node_id`; `group_id` defaults to `SPARKPLUG_GROUP_ID`.
 
 ## Sparkplug B Namespace Structure
 
@@ -463,7 +465,7 @@ From `mqtt-python`: `uv run pytest`. The unit tests need nothing. The integratio
 ## Performance Notes
 
 - MQTT QoS 0 is fastest but provides no delivery guarantee; the broker does not acknowledge it, so success means "written to the network"
-- QoS 1 and 2 are acknowledged by the broker at the cost of latency (QoS 1 is at-least-once: duplicates are possible after a reconnect)
+- QoS 1 and 2 are acknowledged by the broker at the cost of latency. This server never resends a QoS 1 message itself (see [at most once](#read-only-by-default)); the broker's delivery to subscribers follows their own QoS
 - Sparkplug B NBIRTH, DBIRTH, NDATA, DDATA, DDEATH, NCMD and DCMD are published with QoS 0, as the specification requires; NDEATH (the will and the explicit one) uses QoS 1
 - Sequence numbers wrap after 255
 
