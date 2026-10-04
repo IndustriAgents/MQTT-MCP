@@ -313,6 +313,14 @@ def test_implicit_env_file_location(tmp_path, monkeypatch):
     assert config.implicit_env_file() is None  # no .env yet
     (project / ".env").write_text("MQTT_KEEPALIVE=1\n")
     assert config.implicit_env_file() == str(project / ".env")
+    # The package must sit in <project>/src/: a pyproject.toml two levels up is not enough.
+    other = tmp_path / "elsewhere"
+    (other / "lib" / "mqtt_mcp").mkdir(parents=True)
+    (other / "pyproject.toml").write_text('[project]\nname = "mqtt-mcp"\n')
+    (other / ".env").write_text("MQTT_KEEPALIVE=1\n")
+    monkeypatch.setattr(config, "__file__", str(other / "lib" / "mqtt_mcp" / "config.py"))
+    assert config.implicit_env_file() is None
+    monkeypatch.setattr(config, "__file__", str(project / "src" / "mqtt_mcp" / "config.py"))
     # Some other project's src/ layout does not count.
     (project / "pyproject.toml").write_text('[project]\nname = "other"\n')
     assert config.implicit_env_file() is None
