@@ -46,8 +46,12 @@ WRITE_TOOLS = {
         "device_id": "d",
         "metrics": [{"name": "m", "value": 1, "type": "int32"}],
     },
-    "publish_node_command": {"metrics": [{"name": "m", "value": 1, "type": "int32"}]},
+    "publish_node_command": {
+        "edge_node_id": "n",
+        "metrics": [{"name": "m", "value": 1, "type": "int32"}],
+    },
     "publish_device_command": {
+        "edge_node_id": "n",
         "device_id": "d",
         "metrics": [{"name": "m", "value": 1, "type": "int32"}],
     },
@@ -187,8 +191,25 @@ BAD_ARGUMENTS = [
     ),
     (
         "publish_node_command",
-        {"metrics": [{"name": "m", "value": "on", "type": "boolean"}]},
+        {"edge_node_id": "n", "metrics": [{"name": "m", "value": "on", "type": "boolean"}]},
         "true or false",
+    ),
+    # Commands have no default target.
+    ("publish_node_command", {"metrics": METRIC}, "Invalid arguments: edge_node_id"),
+    (
+        "publish_device_command",
+        {"device_id": "d", "metrics": METRIC},
+        "Invalid arguments: edge_node_id",
+    ),
+    (
+        "publish_node_birth",
+        {"metrics": [{"name": "m", "value": 1, "type": "int32"}] * 2},
+        "must be unique",
+    ),
+    (
+        "publish_device_birth",
+        {"device_id": "d", "metrics": [{"name": "m", "value": 1, "type": "int32"}] * 2},
+        "must be unique",
     ),
     (
         "publish_device_command",
@@ -208,7 +229,7 @@ BAD_ARGUMENTS = [
     ("read_messages", {"limit": "5"}, "Invalid arguments"),
     (
         "publish_node_command",
-        {"metrics": [{"name": "m", "value": True, "type": "int32"}]},
+        {"edge_node_id": "n", "metrics": [{"name": "m", "value": True, "type": "int32"}]},
         "must be an integer",
     ),
 ]
@@ -326,7 +347,7 @@ async def test_birth_refused_without_a_registered_will(monkeypatch):
         published.append(args)
         return {"mid": 1, "generation": self.generation, "delivery": "x"}
 
-    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_restart_with_will", no_restart)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "restart_session", no_restart)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", record)
     async with server(MQTT_WRITES_ENABLED="true") as session:
@@ -378,7 +399,7 @@ async def test_message_written_before_a_drop_is_unknown(monkeypatch):
         self.generation += 1  # a reconnect happened right after the write
         return result
 
-    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_restart_with_will", will_registered)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "restart_session", will_registered)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", written_then_dropped)
     async with server(MQTT_WRITES_ENABLED="true") as session:
@@ -396,18 +417,44 @@ async def test_every_tool_call_has_an_overall_deadline(monkeypatch):
     async def hang(self, *args, **kwargs):
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", hang)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", hang)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "subscribe", hang)
     async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.1") as session:
         with anyio.fail_after(20):
             write = await call(session, "publish_message", topic="a/b", payload="x")
             read = await call(session, "subscribe_topic", topic="a/#")
+    # Still waiting for the connection when the deadline hit: nothing was handed to
+    # the MQTT client, so it is not_sent (and cannot be sent later).
+    assert write["success"] is False
+    assert write["meta"]["outcome"] == "not_sent" and write["meta"]["request_sent"] is False
+    assert "deadline" in write["error"] and "will not be sent later" in write["error"]
+    assert read["success"] is False and "deadline" in read["error"]
+    assert "outcome" not in read["meta"]
+
+
+async def test_deadline_after_the_hand_over_is_unknown(monkeypatch):
+    """Handed to the MQTT client, then no confirmation before the deadline: unknown."""
+
+    async def connected(self):
+        return None
+
+    async def never_confirmed(self, info, timeout):
+        await asyncio.sleep(3600)
+
+    def accepted(self, topic, payload=None, qos=0, retain=False, properties=None):
+        info = mqtt.MQTTMessageInfo(4242)
+        info.rc = mqtt.MQTT_ERR_SUCCESS
+        return info
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_await_confirmation", never_confirmed)
+    monkeypatch.setattr(mqtt_server._Client, "publish", accepted)
+    async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.1") as session:
+        with anyio.fail_after(20):
+            write = await call(session, "publish_message", topic="a/b", payload="x")
     assert write["success"] is False
     assert write["meta"]["outcome"] == "unknown" and write["meta"]["request_sent"] is True
-    assert "overall deadline" in write["error"]
     assert "may have been applied; check before retrying" in write["error"]
-    assert read["success"] is False and "overall deadline" in read["error"]
-    assert "outcome" not in read["meta"]
 
 
 class Peer:
@@ -453,10 +500,117 @@ async def test_a_peer_that_is_not_a_broker_gives_clean_failures(reply):
             with anyio.fail_after(30):
                 info = await call(session, "get_broker_info")
                 read = await call(session, "subscribe_topic", topic="a/#")
-                write = await call(session, "publish_device_command", device_id="d", metrics=METRIC)
+                write = await call(
+                    session,
+                    "publish_device_command",
+                    edge_node_id="n",
+                    device_id="d",
+                    metrics=METRIC,
+                )
     finally:
         peer.close()
     assert info["data"]["connected"] is False
+    assert "MQTT broker" in info["data"]["last_error"]  # says why, not null
     assert read["success"] is False and "Not connected" in read["error"]
     assert write["success"] is False
     assert write["meta"] == {"outcome": "not_sent", "request_sent": False, "device_id": "d"}
+
+
+def test_withdraw_detects_a_packet_written_during_removal():
+    """paho pops the head packet, writes part of it and puts it back: a remove()
+    that then succeeds has taken a partly written packet (rule 1a: unknown)."""
+    import collections
+
+    manager = _offline_manager()
+
+    class RacyDeque(collections.deque):
+        def remove(self, packet):
+            packet["pos"] = 100  # written by paho's thread in the meantime
+            super().remove(packet)
+
+    manager.client._out_packet = RacyDeque([_queued_packet(7, 0)])
+    dropped = []
+    manager._shutdown_socket = lambda: dropped.append(True)
+    assert manager._withdraw(7) is False
+    assert dropped == [True]  # the stream lacks the rest of the packet: reconnect
+
+
+def test_a_dropped_connection_gives_up_inflight_publishes_before_paho_resends():
+    from paho.mqtt.reasoncodes import ReasonCode
+
+    manager = _offline_manager()
+    client = manager.client
+    info = client.publish("a/b", b"x", qos=1)
+    client._out_messages[info.mid].state = mqtt.mqtt_ms_wait_for_puback  # written, no PUBACK
+    manager._inflight[info.mid] = mqtt_server._InFlight(info)
+    lost = ReasonCode(mqtt.DISCONNECT >> 4, identifier=0x80)
+    manager._on_disconnect(client, None, None, lost, None)
+    flight = manager._inflight[info.mid]
+    assert flight.lost is True and flight.withdrawn is False  # outcome unknown
+    client._messages_reconnect_reset_out()  # what paho does on reconnect
+    assert info.mid not in client._out_messages  # nothing left to resend
+
+
+async def test_one_deadline_is_shared_by_every_step_of_a_call(monkeypatch):
+    """Waiting for the connection uses up part of the call's deadline: the session
+    restart in publish_node_birth only gets what is left (never a fresh timeout)."""
+    import time as clock
+
+    async def slow_connection(self):
+        await asyncio.sleep(1.5)  # most of the 2 s deadline
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", slow_connection)
+    async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="2") as session:
+        started = clock.monotonic()
+        birth = await call(session, "publish_node_birth")
+        elapsed = clock.monotonic() - started
+    assert birth["success"] is False and birth["meta"]["outcome"] == "not_sent"
+    # The restart gave up at the call's deadline, with its own message; a per-step
+    # timeout would have run past it and been cut off by the call wrapper instead.
+    assert "could not reconnect with the NDEATH will registered" in birth["error"]
+    assert elapsed < 2.4
+
+
+async def test_nothing_is_handed_to_paho_once_the_client_is_gone(monkeypatch):
+    manager = _offline_manager()
+    manager.connected = True  # pretend a broker is there
+
+    async def connected(self):
+        return None
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    manager.close_for_disconnect()
+    with pytest.raises(mqtt_server.PublishError) as raised:
+        await manager.publish("a/b", b"x", qos=1)
+    assert raised.value.outcome == "not_sent"
+    assert manager.client._out_messages == {} and not manager.client._out_packet
+
+
+async def test_a_session_restart_does_not_reconnect_once_closing(monkeypatch):
+    manager = _offline_manager()
+    manager._loop = asyncio.get_running_loop()
+    stopped = []
+    monkeypatch.setattr(
+        manager, "_stop_network", lambda *a: stopped.append(manager.close_for_disconnect())
+    )
+    with pytest.raises(mqtt_server.PublishError, match="shutting down"):
+        await manager.restart_session(3)  # the client goes away during the restart
+    assert stopped and manager.client._will is False  # no will set, no reconnect
+    assert manager.client._thread is None  # paho's network loop was not started
+
+
+async def test_stop_waits_for_a_running_session_restart(monkeypatch):
+    manager = _offline_manager()
+    manager._loop = asyncio.get_running_loop()
+    import time as clock
+
+    def slow_stop(*args):
+        clock.sleep(0.5)
+
+    monkeypatch.setattr(manager, "_stop_network", slow_stop)
+    restart = asyncio.ensure_future(manager.restart_session(None))
+    await asyncio.sleep(0.1)
+    await manager.stop()
+    assert manager._restart_task.done()  # stop() did not leave it running
+    with pytest.raises(mqtt_server.PublishError):
+        await restart  # it saw closing and did not reconnect

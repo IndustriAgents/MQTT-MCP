@@ -29,8 +29,8 @@ def test_defaults():
     assert (s.host, s.port, s.tls) == ("127.0.0.1", 1883, False)
     assert s.writes_enabled is False
     assert s.username is None and s.password is None
-    assert (s.group_id, s.edge_node_id) == ("factory", "edge-node-1")
-    assert s.keepalive == 60 and s.tool_timeout == 5.0 and s.message_buffer_size == 1000
+    assert (s.group_id, s.edge_node_id) == ("factory", "mqtt-mcp")  # not the mock's ID
+    assert s.keepalive == 60 and s.tool_timeout == 10.0 and s.message_buffer_size == 1000
     assert s.broker_url == "mqtt://127.0.0.1:1883"
 
 
@@ -147,6 +147,7 @@ def test_writes_enabled_parsing(raw, expected):
         ("MQTT_KEEPALIVE", "abc"),
         ("MQTT_KEEPALIVE", "-1"),
         ("MQTT_TOOL_TIMEOUT", "0"),
+        ("MQTT_TOOL_TIMEOUT", "60"),  # stays under an MCP client's own 60 s timeout
         ("MQTT_MESSAGE_BUFFER_SIZE", "0"),
         ("SPARKPLUG_GROUP_ID", "plant/1"),
         ("SPARKPLUG_EDGE_NODE_ID", "node#1"),

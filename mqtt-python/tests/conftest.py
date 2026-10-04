@@ -160,6 +160,8 @@ class Proxy:
         self.first_packets: list[bytes] = []
         #: While true, bytes from the broker to the client are dropped (no acks arrive).
         self.hold_downstream = False
+        #: While true, nothing is read from the client: its sends back up.
+        self.pause_upstream = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
@@ -215,7 +217,12 @@ class Proxy:
         async def pipe(src, dst, upstream):
             nonlocal first
             try:
-                while data := await src.read(65536):
+                while True:
+                    while upstream and self.pause_upstream:
+                        await asyncio.sleep(0.01)
+                    data = await src.read(8192 if upstream else 65536)
+                    if not data:
+                        break
                     if upstream and first:
                         self.first_packets.append(data)
                         first = False
@@ -457,3 +464,136 @@ async def eventually(check: Callable[[], Any], timeout: float = 15.0, interval: 
             return last
         await asyncio.sleep(interval)
     raise AssertionError(f"condition not met within {timeout}s (last: {last!r})")
+
+
+class RawServer:
+    """mqtt-mcp driven with raw JSON-RPC over pipes.
+
+    For tests that cancel calls (notifications/cancelled) or close stdin while
+    calls are still running, which the mcp client SDK does not expose.
+    """
+
+    def __init__(self, tmp_path: Path, **env: str) -> None:
+        self.stderr_path = tmp_path / f"raw-server-{uuid.uuid4().hex[:6]}.err"
+        self._errfile = open(self.stderr_path, "w")
+        self.proc = subprocess.Popen(
+            [str(SERVER_EXE)],
+            cwd=tmp_path,
+            env=server_env(**env),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self._errfile,
+        )
+        self.responses: dict[int, dict] = {}
+        self.stray: list[bytes] = []
+        self._cv = threading.Condition()
+        self._next_id = 100
+        threading.Thread(target=self._read, daemon=True).start()
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "raw-test", "version": "0"},
+                },
+            }
+        )
+        assert self.wait(1, 30) is not None, "no initialize response"
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _read(self) -> None:
+        for line in self.proc.stdout:
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                self.stray.append(line)
+                continue
+            with self._cv:
+                if "id" in message:
+                    self.responses[message["id"]] = message
+                self._cv.notify_all()
+
+    def _send(self, message: dict) -> None:
+        self.proc.stdin.write((json.dumps(message) + "\n").encode())
+        self.proc.stdin.flush()
+
+    def call_async(self, name: str, **arguments: Any) -> int:
+        self._next_id += 1
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": self._next_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+        )
+        return self._next_id
+
+    def call(self, name: str, timeout: float = 60, **arguments: Any) -> dict:
+        response = self.wait(self.call_async(name, **arguments), timeout)
+        assert response is not None, f"{name} did not answer within {timeout}s"
+        return response["result"]["structuredContent"]
+
+    def cancel(self, request_id: int) -> None:
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": request_id, "reason": "test"},
+            }
+        )
+
+    def wait(self, request_id: int, timeout: float = 30) -> dict | None:
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            while request_id not in self.responses:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self._cv.wait(left)
+            return self.responses[request_id]
+
+    def close_stdin(self) -> None:
+        self.proc.stdin.close()
+
+    def wait_exit(self, timeout: float = 60) -> int:
+        try:
+            return self.proc.wait(timeout)
+        finally:
+            self._errfile.flush()
+
+    def stderr(self) -> str:
+        self._errfile.flush()
+        return self.stderr_path.read_text()
+
+    def kill(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait()
+        self._errfile.close()
+
+
+@pytest.fixture
+def raw_server(tmp_path):
+    started: list[RawServer] = []
+
+    def start(**env: str) -> RawServer:
+        server = RawServer(tmp_path, **env)
+        started.append(server)
+        return server
+
+    yield start
+    for server in started:
+        server.kill()
+
+
+async def wait_connected_raw(server: RawServer, timeout: float = 25.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if server.call("get_broker_info")["data"]["connected"]:
+            return
+        await asyncio.sleep(0.2)
+    raise AssertionError("the server did not connect")

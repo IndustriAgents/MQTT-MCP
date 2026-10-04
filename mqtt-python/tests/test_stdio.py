@@ -28,8 +28,8 @@ EVERY_TOOL = {
     "publish_device_death": {"device_id": "d"},
     "publish_node_data": {"metrics": METRIC},
     "publish_device_data": {"device_id": "d", "metrics": METRIC},
-    "publish_node_command": {"metrics": METRIC},
-    "publish_device_command": {"device_id": "d", "metrics": METRIC},
+    "publish_node_command": {"edge_node_id": "n", "metrics": METRIC},
+    "publish_device_command": {"edge_node_id": "n", "device_id": "d", "metrics": METRIC},
 }
 
 STRAY_PRINT = (

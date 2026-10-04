@@ -41,11 +41,11 @@ ENV_VARS = {
     "MQTT_TLS_INSECURE": "true disables certificate and hostname verification"
     " (testing only; default false)",
     "MQTT_WRITES_ENABLED": "true enables every tool that publishes (default false: read-only)",
-    "MQTT_TOOL_TIMEOUT": "seconds a tool waits for the connection and broker acknowledgements"
-    " (default 5)",
+    "MQTT_TOOL_TIMEOUT": "deadline of one tool call in seconds, shared by waiting for the"
+    " connection, a session restart and the broker's acknowledgement (default 10)",
     "MQTT_MESSAGE_BUFFER_SIZE": "received messages kept for read_messages (default 1000)",
     "SPARKPLUG_GROUP_ID": "Sparkplug B group ID of this server's edge node (default factory)",
-    "SPARKPLUG_EDGE_NODE_ID": "Sparkplug B edge node ID of this server (default edge-node-1)",
+    "SPARKPLUG_EDGE_NODE_ID": "Sparkplug B edge node ID of this server (default mqtt-mcp)",
 }
 
 
@@ -286,7 +286,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     try:
         group_id = validate_id(_get(env, "SPARKPLUG_GROUP_ID") or "factory", "SPARKPLUG_GROUP_ID")
         edge_node_id = validate_id(
-            _get(env, "SPARKPLUG_EDGE_NODE_ID") or "edge-node-1", "SPARKPLUG_EDGE_NODE_ID"
+            _get(env, "SPARKPLUG_EDGE_NODE_ID") or "mqtt-mcp", "SPARKPLUG_EDGE_NODE_ID"
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from None
@@ -305,7 +305,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         tls_key_password=tls_key_password,
         tls_insecure=tls_insecure,
         writes_enabled=parse_bool(env, "MQTT_WRITES_ENABLED", False),
-        tool_timeout=_parse_number(env, "MQTT_TOOL_TIMEOUT", 5.0, float, 0.1, 300),
+        tool_timeout=_parse_number(env, "MQTT_TOOL_TIMEOUT", 10.0, float, 0.1, 50),
         message_buffer_size=_parse_number(env, "MQTT_MESSAGE_BUFFER_SIZE", 1000, int, 1, 1_000_000),
         group_id=group_id,
         edge_node_id=edge_node_id,

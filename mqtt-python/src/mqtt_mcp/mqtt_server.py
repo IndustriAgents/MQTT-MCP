@@ -15,10 +15,14 @@ import ssl
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
+import anyio
+import anyio.lowlevel
 import paho.mqtt.client as mqtt
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -87,6 +91,18 @@ def _check_id(value: Any, what: str) -> str:
         raise ToolInputError(str(exc)) from None
 
 
+def _check_unique_names(metrics: list[Any]) -> None:
+    """A birth certificate defines each metric once (Sparkplug B)."""
+    seen, duplicates = set(), set()
+    for metric in metrics:
+        name = metric.get("name") if isinstance(metric, dict) else None
+        (duplicates if name in seen else seen).add(name)
+    if duplicates:
+        raise ToolInputError(
+            f"metric names must be unique in a birth certificate; repeated: {sorted(duplicates)}"
+        )
+
+
 def _check_metrics(metrics: Any, *, required: bool) -> list[Any]:
     if metrics is None:
         metrics = []
@@ -124,6 +140,34 @@ OUTCOMES = ("written", "rejected", "unknown", "not_sent")
 UNKNOWN_HINT = "It may have been applied; check before retrying."
 
 
+@dataclass
+class SendState:
+    """What the current tool call has handed to the MQTT client (one per call).
+
+    Shared through a context variable, so that a call that ends without a result
+    (deadline, client cancel, client disconnect) can still say whether anything
+    may have been sent.
+    """
+
+    sent: bool = False  # a message was handed to the MQTT client
+    outcome: str | None = None  # set when the publish ended without a result
+    #: The call's one absolute deadline (time.monotonic()); every wait in the call
+    #: (connection, session restart, acknowledgement) uses what is left of it.
+    deadline: float | None = None
+
+
+_send_state: ContextVar[SendState | None] = ContextVar("mqtt_mcp_send_state", default=None)
+
+
+@dataclass
+class _InFlight:
+    """A publish handed to paho and not yet confirmed or given up."""
+
+    info: mqtt.MQTTMessageInfo
+    lost: bool = False  # the connection dropped before confirmation
+    withdrawn: bool | None = None  # _withdraw's verdict when it was lost
+
+
 class PublishError(RuntimeError):
     """A request did not complete; ``outcome`` says whether it may have gone out."""
 
@@ -137,13 +181,17 @@ class _Client(mqtt.Client):
     """paho client that remembers why the last connection attempt failed."""
 
     last_connect_error: str | None = None
+    tcp_connected_at: float | None = None  # monotonic time of the last TCP connect
 
     def reconnect(self) -> mqtt.MQTTErrorCode:
+        self.tcp_connected_at = None
         try:
-            return super().reconnect()
+            result = super().reconnect()
         except OSError as exc:
             self.last_connect_error = f"{type(exc).__name__}: {exc}"
             raise
+        self.tcp_connected_at = time.monotonic()
+        return result
 
 
 def build_client(settings: Settings) -> _Client:
@@ -186,6 +234,10 @@ class MQTTClientManager:
         self.last_error: str | None = None
         self.last_refusal: str | None = None  # last CONNACK refusal (kept after reconnects)
         self._expect_disconnect = False
+        #: Set when the MCP client is gone or the server stops: nothing more is sent.
+        self.closing = False
+        self._inflight: dict[int, _InFlight] = {}  # mid -> publish awaiting confirmation
+        self._restart_task: asyncio.Task | None = None
         self.subscriptions: dict[str, int] = {}  # filter -> QoS granted by the broker
         self._pending: dict[int, tuple[asyncio.Future | None, str, str]] = {}
         self.messages = MessageBuffer(settings.message_buffer_size)
@@ -229,18 +281,36 @@ class MQTTClientManager:
         self.client.loop_start()
         await self.wait_for(lambda: self.connected, min(1.0, self.settings.tool_timeout))
 
-    async def stop(self) -> None:
-        """Publish NDEATH if this server's edge node is born, then disconnect.
+    def close_for_disconnect(self) -> None:
+        """The MCP client is gone: from now on nothing is sent for a tool call."""
+        with self._lock:
+            self.closing = True
 
-        If the NDEATH is not confirmed, the connection is dropped without a
-        DISCONNECT so that the broker publishes the NDEATH will instead.
+    async def stop(self) -> None:
+        """Stop sending, publish NDEATH if this server's edge node is born, disconnect.
+
+        Pending publishes are withdrawn first, and a session restart that is still
+        running is waited for (it does not reconnect once ``closing`` is set). If
+        the NDEATH is not confirmed, the connection is dropped without a DISCONNECT
+        so that the broker publishes the NDEATH will instead.
         """
         if self.client is None:
             return
-        graceful = True
-        if self.node_born and self.connected:
+        with self._lock:
+            self.closing = True
+        task = self._restart_task
+        if task is not None and not task.done():
             try:
-                await self.publish(*self._ndeath_message(), qos=1, timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(task), 2 * self.settings.tool_timeout + 1)
+            except BaseException as exc:  # finished with an error, or still stuck
+                logger.info("Session restart ended on shutdown: %s", exc)
+        with self._lock:
+            for mid in list(self._inflight):
+                self._finish(mid)
+        graceful = True
+        if self.node_born and self.will_active and self.connected:
+            try:
+                await self.publish(*self._ndeath_message(), qos=1, timeout=2.0, shutdown=True)
             except PublishError as exc:
                 logger.warning("NDEATH not confirmed on shutdown (%s); leaving it to the will", exc)
                 graceful = False
@@ -276,15 +346,38 @@ class MQTTClientManager:
             except OSError:
                 pass
 
+    def time_left(self) -> float:
+        """Seconds left until the current tool call's deadline (MQTT_TOOL_TIMEOUT
+        outside a tool call). Each step uses what is left; nothing restarts it."""
+        state = _send_state.get()
+        if state is not None and state.deadline is not None:
+            return max(0.0, state.deadline - time.monotonic())
+        return self.settings.tool_timeout
+
     async def wait_for(self, condition, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while not condition() and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         return bool(condition())
 
+    def current_error(self) -> str | None:
+        """Why the server is not connected right now, as far as it is known."""
+        if self.connected:
+            return None
+        if self.last_error or (self.client and self.client.last_connect_error):
+            return self.last_error or self.client.last_connect_error
+        client = self.client
+        if client is not None and client.socket() is not None and client.tcp_connected_at:
+            waited = time.monotonic() - client.tcp_connected_at
+            return (
+                f"the TCP connection is open, but no CONNACK has arrived for {waited:.0f}s:"
+                " the peer does not answer as an MQTT broker"
+            )
+        return None
+
     async def require_connection(self) -> None:
-        if not await self.wait_for(lambda: self.connected, self.settings.tool_timeout):
-            reason = self.last_error or (self.client.last_connect_error if self.client else None)
+        if not await self.wait_for(lambda: self.connected, self.time_left()):
+            reason = self.current_error()
             detail = f" (last error: {reason})" if reason else ""
             raise PublishError(
                 f"Not connected to the MQTT broker at {self.settings.broker_url}{detail}."
@@ -327,8 +420,16 @@ class MQTTClientManager:
             self.connected = False
             pending = [future for future, _, _ in self._pending.values() if future is not None]
             self._pending.clear()
+            # paho resends unacknowledged QoS 1/2 messages when it reconnects (and
+            # this runs before it does): withdraw every unconfirmed publish now, so a
+            # message is never sent twice. The waiting calls end as unknown/not_sent.
+            for mid, flight in self._inflight.items():
+                if not flight.lost:
+                    flight.withdrawn = self._withdraw(mid)
+                    flight.lost = True
             if not self._expect_disconnect:
                 self._connection_lost(client, reason_code, was_connected)
+
         for future in pending:
             self._resolve(future, None)
 
@@ -337,6 +438,11 @@ class MQTTClientManager:
         if not was_connected:
             # A refused or failed CONNECT: the broker never held our will, so keep it
             # configured for the next attempt.
+            if self.last_error is None and not client.last_connect_error:
+                self.last_error = (
+                    f"the connection closed before the broker accepted it ({reason_code}):"
+                    " the peer does not answer as an MQTT broker"
+                )
             return
         self.last_error = f"connection lost: {reason_code}"
         logger.warning("Connection to the broker lost (%s); reconnecting", reason_code)
@@ -415,12 +521,12 @@ class MQTTClientManager:
                 raise PublishError(f"the {kind} was not sent: {mqtt.error_string(result)}")
             self._pending[mid] = (future, kind, topic)
         try:
-            reason_codes = await asyncio.wait_for(future, self.settings.tool_timeout)
+            reason_codes = await asyncio.wait_for(future, self.time_left())
         except asyncio.TimeoutError:
             with self._lock:
                 self._pending.pop(mid, None)
             raise PublishError(
-                f"the broker did not acknowledge the {kind} within {self.settings.tool_timeout}s",
+                f"the broker did not acknowledge the {kind} before the call's deadline",
                 outcome="unknown",
                 request_sent=True,
             ) from None
@@ -452,31 +558,59 @@ class MQTTClientManager:
         qos: int = 0,
         retain: bool = False,
         timeout: float | None = None,
+        *,
+        shutdown: bool = False,
     ) -> dict[str, Any]:
         """Publish once and confirm: QoS 0 when written to the socket, QoS 1/2 on the
-        broker's acknowledgement. Never retried by this server.
+        broker's acknowledgement. Never retried, and never sent twice.
 
-        Raises PublishError otherwise. An unconfirmed message is withdrawn from
-        paho's queues so that it cannot go out later; if it may already have
-        left, the outcome is "unknown".
+        Raises PublishError otherwise, with the outcome: "not_sent" if nothing can
+        have left, "unknown" if it may have. If the call ends for any other reason
+        (deadline, client cancel, client gone), the message is withdrawn from
+        paho's queues before the exception propagates, so it cannot go out later,
+        and the outcome is recorded in the call's SendState.
         """
         await self.require_connection()
         assert self.client is not None
-        timeout = self.settings.tool_timeout if timeout is None else timeout
-        generation = self.generation
-        info = self.client.publish(topic, payload, qos=qos, retain=retain)
+        timeout = self.time_left() if timeout is None else timeout
+        state = _send_state.get()
+        with self._lock:
+            # No await between this check and the hand-over to paho.
+            if self.closing and not shutdown:
+                raise PublishError(
+                    "the server is shutting down (the MCP client is gone); nothing was sent"
+                )
+            generation = self.generation
+            info = self.client.publish(topic, payload, qos=qos, retain=retain)
+            self._inflight[info.mid] = _InFlight(info)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             # Nothing was written (no connection); QoS 1/2 would be queued for later.
-            if self._withdraw(info.mid) is not False:
+            if self._finish(info.mid) is not False:
                 raise PublishError(f"not sent: {mqtt.error_string(info.rc)}")
+            if state is not None:
+                state.sent = True
             raise PublishError(
                 f"not sent now ({mqtt.error_string(info.rc)}), and it could not be removed"
                 f" from the client's queue, so it may go out after a reconnect. {UNKNOWN_HINT}",
                 outcome="unknown",
                 request_sent=True,
             )
-        published = await asyncio.to_thread(_wait_for_publish, info, timeout)
-        if published is True:
+        if state is not None:
+            state.sent = True
+        try:
+            problem = await self._await_confirmation(info, timeout)
+        except BaseException:
+            # Cancelled (deadline, client cancel, client gone): make sure it cannot go
+            # out later, and record what is known for the caller.
+            withdrawn = self._finish(info.mid)
+            if state is not None:
+                state.outcome = (
+                    "not_sent" if withdrawn is True and self.generation == generation else "unknown"
+                )
+            raise
+        if problem is None:
+            with self._lock:
+                self._inflight.pop(info.mid, None)
             return {
                 "mid": info.mid,
                 "generation": generation,
@@ -488,23 +622,44 @@ class MQTTClientManager:
                     " whether it had any effect on a device is not known"
                 ),
             }
-        withdrawn = self._withdraw(info.mid)
-        if withdrawn is True and self.generation == generation:
-            raise PublishError(
-                f"not written to the network within {timeout}s ({published}); withdrawn,"
-                " nothing was sent"
-            )
+        withdrawn = self._finish(info.mid)
+        if withdrawn is True and (problem == "connection lost" or self.generation == generation):
+            raise PublishError(f"{problem} before it was written; nothing was sent")
         what = (
             "was not confirmed as written"
             if qos == 0
             else f"was not acknowledged by the broker (QoS {qos})"
         )
         raise PublishError(
-            f"the message {what} within {timeout}s ({published}) and may have reached the"
-            f" broker. This server does not send it again. {UNKNOWN_HINT}",
+            f"the message {what} ({problem}) and may have reached the broker. This server"
+            f" does not send it again. {UNKNOWN_HINT}",
             outcome="unknown",
             request_sent=True,
         )
+
+    async def _await_confirmation(self, info: mqtt.MQTTMessageInfo, timeout: float) -> str | None:
+        """None once paho reports the message published, else why not."""
+        deadline = time.monotonic() + timeout
+        flight = self._inflight.get(info.mid)
+        while True:
+            try:
+                if info.is_published():
+                    return None
+            except (RuntimeError, ValueError) as exc:
+                return str(exc)
+            if flight is not None and flight.lost:
+                return "connection lost"
+            if time.monotonic() >= deadline:
+                return f"no confirmation within {timeout:g}s"
+            await asyncio.sleep(0.01)
+
+    def _finish(self, mid: int) -> bool | None:
+        """Stop tracking a publish and withdraw it from paho (see _withdraw)."""
+        with self._lock:
+            flight = self._inflight.pop(mid, None)
+            if flight is not None and flight.lost:
+                return flight.withdrawn  # already withdrawn when the connection dropped
+            return self._withdraw(mid)
 
     def _withdraw(self, mid: int) -> bool | None:
         """Remove an unconfirmed publish from paho's outgoing queues (paho 2.x internals).
@@ -524,9 +679,16 @@ class MQTTClientManager:
                 if packet.get("pos", 0) == 0:
                     try:
                         client._out_packet.remove(packet)
-                        removed_unsent = True
                     except ValueError:  # taken for writing just now
                         partial = True
+                        continue
+                    if packet.get("pos", 0) != 0:
+                        # paho took it, wrote part of it and put it back before our
+                        # remove(): bytes went out, and the stream now lacks the rest.
+                        partial = True
+                        self._shutdown_socket()
+                    else:
+                        removed_unsent = True
                 else:
                     partial = True
             with client._out_message_mutex:
@@ -558,31 +720,52 @@ class MQTTClientManager:
         topic = sparkplug.topic(self.settings.group_id, "NDEATH", self.settings.edge_node_id)
         return topic, payload.SerializeToString()
 
-    async def _restart_with_will(self, bd_seq: int) -> None:
-        """Reconnect so that the broker holds an NDEATH will carrying ``bd_seq``."""
+    async def restart_session(self, bd_seq: int | None) -> None:
+        """Reconnect with an NDEATH will carrying ``bd_seq``, or without a will (None).
+
+        Runs as its own task, shielded from the calling tool's cancellation, so the
+        client is never left half-restarted; ``stop()`` waits for it. It does not
+        reconnect once ``closing`` is set.
+        """
+        self._restart_task = asyncio.ensure_future(self._restart(bd_seq))
+        # Its error is reported to the caller; if the caller is gone, swallow it here.
+        self._restart_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        await asyncio.shield(self._restart_task)
+
+    async def _restart(self, bd_seq: int | None) -> None:
         assert self.client is not None
-        payload = sparkplug.build_payload(
-            [], seq=None, extra_metrics=[sparkplug.bd_seq_metric(bd_seq)]
-        )
+        if self.closing:
+            raise PublishError("the server is shutting down; the session was not restarted")
         topic = sparkplug.topic(self.settings.group_id, "NDEATH", self.settings.edge_node_id)
+        payload = None
+        if bd_seq is not None:
+            payload = sparkplug.build_payload(
+                [], seq=None, extra_metrics=[sparkplug.bd_seq_metric(bd_seq)]
+            ).SerializeToString()
         await asyncio.to_thread(self._stop_network, True, self.settings.tool_timeout)
         with self._lock:
-            self.client.will_set(topic, payload.SerializeToString(), qos=1, retain=False)
-            self._will_bd_seq = bd_seq
-            self._next_bd_seq = (bd_seq + 1) % 256  # every CONNECT with a will gets a new one
+            if self.closing:  # checked under the lock, right before reconnecting
+                raise PublishError("the server is shutting down; the session was not restarted")
+            if payload is None:
+                self.client.will_clear()
+                self._will_bd_seq = None
+            else:
+                self.client.will_set(topic, payload, qos=1, retain=False)
+                self._will_bd_seq = bd_seq
+                self._next_bd_seq = (bd_seq + 1) % 256  # every CONNECT with a will gets one
             self.last_refusal = None
             self._expect_disconnect = False
-        self.client.connect_async(
-            self.settings.host, self.settings.port, keepalive=self.settings.keepalive
-        )
-        self.client.loop_start()
-        if not await self.wait_for(
-            lambda: self.connected and self.will_active, self.settings.tool_timeout
-        ):
-            reason = (
-                self.last_refusal or self.last_error or self.client.last_connect_error or "timeout"
+            self.client.connect_async(
+                self.settings.host, self.settings.port, keepalive=self.settings.keepalive
             )
-            raise PublishError(f"could not reconnect with the NDEATH will registered ({reason})")
+            self.client.loop_start()
+        wanted = (
+            (lambda: self.connected and self.will_active) if payload else (lambda: self.connected)
+        )
+        if not await self.wait_for(wanted, self.time_left()):
+            reason = self.last_refusal or self.current_error() or "timeout"
+            what = "with the NDEATH will registered" if payload else "without a will"
+            raise PublishError(f"could not reconnect {what} ({reason})")
 
     def sparkplug_state(self) -> dict[str, Any]:
         return {
@@ -595,14 +778,6 @@ class MQTTClientManager:
             "devices_born": sorted(self.device_births),
             "node_lost": self.node_lost,
         }
-
-
-def _wait_for_publish(info: mqtt.MQTTMessageInfo, timeout: float) -> bool | str:
-    try:
-        info.wait_for_publish(timeout)
-        return True if info.is_published() else "timed out"
-    except (RuntimeError, ValueError) as exc:
-        return str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +814,8 @@ def set_settings(settings: Settings | None) -> None:
 async def mqtt_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     """Create the MQTT client on startup and disconnect it on shutdown."""
     manager = MQTTClientManager(get_settings())
+    if isinstance(server, EnvelopeFastMCP):
+        server.on_client_disconnect = manager.close_for_disconnect
     await manager.start()
     try:
         yield {"mqtt_manager": manager}
@@ -646,15 +823,19 @@ async def mqtt_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         await manager.stop()
 
 
-def overall_deadline(settings: Settings) -> float:
-    """Upper bound for one tool call, so that no call can hang without an outcome.
+def call_deadline(settings: Settings) -> float:
+    """Seconds one tool call may take, from its start: MQTT_TOOL_TIMEOUT.
 
-    Every broker wait inside a tool is bounded by MQTT_TOOL_TIMEOUT; the longest
-    chain (a first NBIRTH: connection, session restart with the will, connection,
-    publish) is about six of them. The deadline adds headroom for a call that
-    queues behind another one.
+    It is one absolute deadline per call, shared by every step (waiting for the
+    connection or a lock, a session restart, the broker's acknowledgement), so
+    no call can hang without an outcome and none is sent after its deadline.
     """
-    return 8 * settings.tool_timeout + 2.0
+    return settings.tool_timeout
+
+
+#: Extra time the call wrapper gives the steps to report their own result once
+#: the deadline has passed (the steps themselves stop at the deadline).
+_REPORT_GRACE = 0.5
 
 
 #: Tools that publish (all gated by MQTT_WRITES_ENABLED).
@@ -673,35 +854,130 @@ WRITE_TOOLS = frozenset(
 )
 
 
+#: Errors that only mean a reply could not be delivered to a client that is gone.
+_UNDELIVERABLE = (
+    anyio.ClosedResourceError,
+    anyio.BrokenResourceError,
+    BrokenPipeError,
+    ConnectionResetError,
+)
+
+
+def _only_undeliverable(exc: BaseException) -> bool:
+    if isinstance(exc, _UNDELIVERABLE):
+        return True
+    inner = getattr(exc, "exceptions", None)  # an exception group
+    return bool(inner) and all(_only_undeliverable(e) for e in inner)
+
+
 class EnvelopeFastMCP(FastMCP):
     """FastMCP with the suite's envelope for every outcome of a tool call.
 
     - FastMCP validates arguments against the tool's signature before the tool
       runs and turns a failure into a protocol-level tool error. Here such errors
       come back as ``{success: false, error: "Invalid arguments: ..."}``.
-    - Every call has an overall deadline (``overall_deadline``). A write that
-      runs out of time is reported as outcome "unknown" (it may have been sent);
-      a read gets a clean error.
+    - Every call has one absolute deadline (``call_deadline``). A write that
+      runs out of time reports what it knows: "not_sent" if nothing was handed to
+      the MQTT client (or it was withdrawn in time), else "unknown". A read gets
+      a clean error. Nothing is sent after the deadline.
+    - When the MCP client disconnects (stdin closes), every running call is
+      cancelled at once and nothing more is published; see run_stdio_async.
     """
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):
-        deadline = overall_deadline(get_settings())
+    #: Called once when the client's stdin reaches end of file (set by the lifespan).
+    on_client_disconnect: Callable[[], None] | None = None
+    #: True once the client's stdin has reached end of file.
+    client_gone: bool = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._active_calls: set[anyio.CancelScope] = set()
+
+    async def run_stdio_async(self) -> None:
+        """Serve stdio; when the client disconnects, stop every pending call first.
+
+        FastMCP stops reading at end of file but lets running tool calls finish,
+        so a publish still waiting for the broker would go out after the client
+        is gone. Messages are relayed through a stream whose end marks the server
+        as closing and cancels the running calls; a reply that can no longer be
+        delivered then is a normal end (exit status 0), not a crash.
+        """
+        from mcp.server.stdio import stdio_server
+
+        self.client_gone = False
         try:
-            return await asyncio.wait_for(self._call_enveloped(name, arguments), deadline)
-        except asyncio.TimeoutError:
-            if name in WRITE_TOOLS:
-                return _fail(
-                    f"{name} did not finish within its overall deadline of {deadline:g}s."
-                    f" {UNKNOWN_HINT}",
-                    tool=name,
-                    outcome="unknown",
-                    request_sent=True,
-                )
+            async with stdio_server() as (read_stream, write_stream):
+                relay_send, relay_receive = anyio.create_memory_object_stream(0)
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(self._relay_until_eof, read_stream, relay_send)
+                    await self._mcp_server.run(
+                        relay_receive,
+                        write_stream,
+                        self._mcp_server.create_initialization_options(),
+                    )
+                    tg.cancel_scope.cancel()
+        except BaseException as exc:
+            if not (self.client_gone and _only_undeliverable(exc)):
+                raise
+            logger.info("Dropped replies for the disconnected client")
+
+    async def _relay_until_eof(self, source: Any, sink: Any) -> None:
+        try:
+            async with sink:
+                async for message in source:
+                    await sink.send(message)
+        finally:
+            self.client_disconnected()
+
+    def client_disconnected(self) -> None:
+        """The MCP client is gone: send nothing more and cancel running calls."""
+        if self.client_gone:
+            return
+        self.client_gone = True
+        logger.info("MCP client disconnected; cancelling running tool calls")
+        if self.on_client_disconnect is not None:
+            self.on_client_disconnect()
+        for scope in list(self._active_calls):
+            scope.cancel()
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        deadline = call_deadline(get_settings())
+        state = SendState(deadline=time.monotonic() + deadline)
+        token = _send_state.set(state)
+        try:
+            with anyio.CancelScope() as scope:
+                self._active_calls.add(scope)
+                try:
+                    if self.client_gone:
+                        scope.cancel()
+                        await anyio.lowlevel.checkpoint()
+                    return await asyncio.wait_for(
+                        self._call_enveloped(name, arguments), deadline + _REPORT_GRACE
+                    )
+                except asyncio.TimeoutError:
+                    return self._ended_early(
+                        name, state, f"did not finish within its deadline of {deadline:g}s"
+                    )
+                finally:
+                    self._active_calls.discard(scope)
+            # Only reached when client_disconnected() cancelled this call.
+            return self._ended_early(name, state, "was cancelled: the MCP client disconnected")
+        finally:
+            _send_state.reset(token)
+
+    def _ended_early(self, name: str, state: SendState, why: str) -> dict[str, Any]:
+        if name not in WRITE_TOOLS:
+            return _fail(f"{name} {why}; nothing was changed", tool=name)
+        if not state.sent or state.outcome == "not_sent":
             return _fail(
-                f"{name} did not finish within its overall deadline of {deadline:g}s;"
-                " nothing was changed",
+                f"{name} {why}. Nothing was sent, and it will not be sent later.",
                 tool=name,
+                outcome="not_sent",
+                request_sent=False,
             )
+        return _fail(
+            f"{name} {why}. {UNKNOWN_HINT}", tool=name, outcome="unknown", request_sent=True
+        )
 
     async def _call_enveloped(self, name: str, arguments: dict[str, Any]):
         try:
@@ -775,7 +1051,7 @@ def get_broker_info(ctx: Context) -> dict[str, Any]:
     s = m.settings
     with m._lock:
         subscriptions = [{"topic": t, "qos": q} for t, q in sorted(m.subscriptions.items())]
-        last_error = m.last_error or (m.client.last_connect_error if m.client else None)
+        last_error = m.current_error()
     return _ok(
         {
             "broker": s.broker_url,
@@ -1022,9 +1298,8 @@ async def publish_message(
     acknowledged it (an MQTT 3.1.1 broker acknowledges even a publish its ACL
     drops). meta.outcome "not_sent" means nothing left the server. "unknown"
     means it may have reached the broker: the server does not send it again, so
-    check before retrying. QoS 1 is at-least-once: if the connection drops before
-    the acknowledgement, the MQTT client resends it once reconnected (marked as a
-    duplicate) within the same call, so subscribers can get it twice.
+    check before retrying. If the connection drops while the call waits for the
+    acknowledgement, the message is given up (never resent on reconnect).
     """
     m = _manager(ctx)
     if (refused := _writes_disabled(m)) is not None:
@@ -1073,7 +1348,12 @@ async def _publish_edge(
         result = await m.publish(topic, payload.SerializeToString(), qos=0)
     except PublishError as exc:
         if exc.outcome == "unknown":
-            m.seq = seq  # it may still go out with this seq; do not reuse it
+            m.seq = seq  # it may have gone out with this seq; never reuse it
+        raise
+    except BaseException:  # cancelled: publish() recorded whether it may have gone out
+        state = _send_state.get()
+        if state is not None and state.sent and state.outcome != "not_sent":
+            m.seq = seq
         raise
     m.seq = seq
     if m.generation != result["generation"] or not m.will_active:
@@ -1129,6 +1409,7 @@ async def publish_node_birth(
     try:
         metrics = _check_metrics(metrics, required=False)
         sparkplug.build_payload(metrics, seq=0)  # validate before touching the connection
+        _check_unique_names(metrics)
         reserved = {sparkplug.BD_SEQ_METRIC, sparkplug.REBIRTH_METRIC}
         clash = sorted({x.get("name") for x in metrics} & reserved)
         if clash:
@@ -1137,16 +1418,15 @@ async def publish_node_birth(
             await m.require_connection()
             reconnected = False
             if not m.will_active:
-                # Shielded: if the call's overall deadline cancels it, the session
-                # restart still finishes, so the client is never left stopped.
-                await asyncio.shield(m._restart_with_will(m._next_bd_seq))
+                await m.restart_session(m._next_bd_seq)
                 reconnected = True
             with m._lock:
                 will_ok = m.connected and m.will_active and m.bd_seq is not None
             if not will_ok:
                 raise PublishError(
                     "no NDEATH will is registered with the broker for this connection"
-                    f" ({m.last_refusal or m.last_error or 'connection changed'}); NBIRTH not sent"
+                    f" ({m.last_refusal or m.current_error() or 'connection changed'});"
+                    " NBIRTH not sent"
                 )
             extra = [sparkplug.bd_seq_metric(m.bd_seq), sparkplug.rebirth_metric()]
             data = await _publish_edge(m, "NBIRTH", metrics, extra=extra, seq_mode="zero")
@@ -1168,21 +1448,29 @@ async def publish_node_death(ctx: Context) -> dict[str, Any]:
     Only possible after publish_node_birth. The payload carries the bdSeq of the
     NBIRTH and no seq, as the specification requires; it is sent with QoS 1 and
     confirmed by the broker. All of the node's devices count as dead afterwards.
+    The server then reconnects without the NDEATH will, so that the broker does
+    not announce the death a second time; the next NBIRTH uses a new bdSeq.
     """
     m = _manager(ctx)
     if (refused := _writes_disabled(m)) is not None:
         return refused
+    meta: dict[str, Any] = {}
     try:
         async with m.sparkplug_lock:
             if not m.node_born:
                 raise ToolInputError("this server's edge node is not born; nothing to kill")
             topic, payload = m._ndeath_message()
+            bd_seq = m.bd_seq
             result = await m.publish(topic, payload, qos=1)
             m.node_born = False
             m.device_births.clear()
+            try:
+                await m.restart_session(None)
+            except PublishError as exc:
+                meta["reconnect"] = f"the NDEATH was published, but {exc}"
     except (ToolInputError, PublishError) as exc:
         return _edge_failure("NDEATH", exc)
-    return _written({"topic": topic, "bd_seq": m.bd_seq, **result})
+    return _written({"topic": topic, "bd_seq": bd_seq, **result}, **meta)
 
 
 @mcp.tool(annotations=_WRITE)
@@ -1208,6 +1496,7 @@ async def publish_device_birth(
         device_id = _check_id(device_id, "device_id")
         metrics = _check_metrics(metrics, required=False)
         sparkplug.build_payload(metrics, seq=0)
+        _check_unique_names(metrics)
         async with m.sparkplug_lock:
             if not m.node_born:
                 raise ToolInputError("publish_node_birth first: the edge node is not born")
@@ -1311,11 +1600,11 @@ async def _publish_command(
     message_type: str,
     metrics: Any,
     group_id: str | None,
-    edge_node_id: str | None,
+    edge_node_id: str,
     device_id: str | None = None,
 ) -> dict[str, Any]:
     target_group = _check_id(group_id or m.settings.group_id, "group_id")
-    target_node = _check_id(edge_node_id or m.settings.edge_node_id, "edge_node_id")
+    target_node = _check_id(edge_node_id, "edge_node_id")
     metrics = _check_metrics(metrics, required=True)
     payload = sparkplug.build_payload(metrics, seq=None)  # commands carry no seq
     topic = sparkplug.topic(target_group, message_type, target_node, device_id)
@@ -1327,8 +1616,8 @@ async def _publish_command(
 @_metrics_doc
 async def publish_node_command(
     ctx: Context,
+    edge_node_id: str,
     metrics: list[dict[str, Any]],
-    edge_node_id: str | None = None,
     group_id: str | None = None,
 ) -> dict[str, Any]:
     """WRITE: send a Sparkplug B NCMD to an edge node.
@@ -1346,7 +1635,7 @@ async def publish_node_command(
 
     Parameters:
         metrics: at least one metric to write. {METRICS_HELP}
-        edge_node_id: target edge node (default: SPARKPLUG_EDGE_NODE_ID).
+        edge_node_id: target edge node (required; there is no default target).
         group_id: target group (default: SPARKPLUG_GROUP_ID).
     """
     m = _manager(ctx)
@@ -1363,9 +1652,9 @@ async def publish_node_command(
 @_metrics_doc
 async def publish_device_command(
     ctx: Context,
+    edge_node_id: str,
     device_id: str,
     metrics: list[dict[str, Any]],
-    edge_node_id: str | None = None,
     group_id: str | None = None,
 ) -> dict[str, Any]:
     """WRITE: send a Sparkplug B DCMD to a device of an edge node.
@@ -1383,7 +1672,7 @@ async def publish_device_command(
     Parameters:
         device_id: target device ID.
         metrics: at least one metric to write. {METRICS_HELP}
-        edge_node_id: edge node the device belongs to (default: SPARKPLUG_EDGE_NODE_ID).
+        edge_node_id: edge node the device belongs to (required; no default target).
         group_id: target group (default: SPARKPLUG_GROUP_ID).
     """
     m = _manager(ctx)
