@@ -27,6 +27,7 @@ import json
 import math
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -130,6 +131,7 @@ class SparkplugEdgeNode:
         self.seq = 0
         self.bd_seq = 0
         self.node_online = False
+        self.stopping = False  # set by shutdown(): no more births after the deaths
         self.start_time = time.time()
         self.devices = {
             "device-1": {
@@ -187,6 +189,8 @@ class SparkplugEdgeNode:
     def publish_births(self) -> bool:
         """NBIRTH (seq 0) followed by a DBIRTH for every device."""
         with self.lock:
+            if self.stopping:
+                return False
             self.seq = 0
             metrics = [
                 (BD_SEQ, pb.Int64, self.bd_seq),
@@ -202,21 +206,24 @@ class SparkplugEdgeNode:
                 ok = self._publish(self.topic("DBIRTH", device_id), payload) and ok
             return ok
 
-    def publish_deaths(self) -> None:
-        """DDEATH for every device, then NDEATH; waits for the NDEATH PUBACK."""
+    def publish_deaths(self) -> bool:
+        """DDEATH for every device, then NDEATH; True once the NDEATH PUBACK arrived."""
         with self.lock:
+            self.stopping = True
             if not self.node_online:
-                return
+                return False
             for device_id in self.devices:
                 payload = build_payload([], seq=self._next_seq())
                 self._publish(self.topic("DDEATH", device_id), payload)
             info = self.client.publish(self.topic("NDEATH"), self.death_payload(), qos=1)
             self.node_online = False
-        if info.rc == mqtt.MQTT_ERR_SUCCESS:
-            try:
-                info.wait_for_publish(2.0)
-            except (RuntimeError, ValueError):
-                pass
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            return False
+        try:
+            info.wait_for_publish(2.0)
+            return info.is_published()
+        except (RuntimeError, ValueError):
+            return False
 
     # -- periodic data ----------------------------------------------------------
 
@@ -417,9 +424,20 @@ class MockEdgeNode:
             self._shut_down = True
         log("Shutting down...")
         self.running = False
-        if self.connected:
-            self.sparkplug.publish_deaths()
-        self.client.disconnect()
+        with self.sparkplug.lock:
+            self.sparkplug.stopping = True
+        confirmed = self.connected and self.sparkplug.publish_deaths()
+        if confirmed or not self.connected:
+            self.client.disconnect()
+        else:
+            # NDEATH not confirmed: drop the connection without DISCONNECT so that the
+            # broker publishes the NDEATH will instead.
+            sock = self.client.socket()
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
         self.client.loop_stop()
         log("Shutdown complete")
 
