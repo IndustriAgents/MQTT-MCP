@@ -183,7 +183,6 @@ def test_dotenv_is_loaded_before_reading_settings(tmp_path, monkeypatch):
     assert (s.host, s.port) == ("dotenv-host", 1777)
     assert s.group_id == "from-dotenv"
     assert s.edge_node_id == "from-env"
-    assert os.environ["SPARKPLUG_GROUP_ID"] == "from-dotenv"
 
 
 def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
@@ -191,3 +190,52 @@ def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MQTT_BROKER_URL", "mqtt://env-host:1666")
     assert mqtt_server.get_settings().host == "env-host"
+
+
+def test_implicit_dotenv_cannot_open_the_write_gate(tmp_path, monkeypatch, caplog):
+    project = tmp_path / "client-project" / "sub"
+    project.mkdir(parents=True)
+    # Found automatically, from a parent of the working directory.
+    (tmp_path / "client-project" / ".env").write_text(
+        "MQTT_WRITES_ENABLED=true\nMQTT_BROKER_URL=mqtt://dotenv-host:1777\n"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.delenv("MQTT_WRITES_ENABLED", raising=False)
+    monkeypatch.delenv("MQTT_BROKER_URL", raising=False)
+    with caplog.at_level("WARNING", logger="mqtt_mcp"):
+        s = mqtt_server.get_settings()
+    assert s.writes_enabled is False
+    assert s.host == "dotenv-host"  # connection settings still come from the file
+    assert "MQTT_WRITES_ENABLED" not in os.environ
+    assert any("Ignoring MQTT_WRITES_ENABLED" in r.getMessage() for r in caplog.records)
+
+
+def test_explicit_env_file_may_open_the_write_gate(tmp_path, monkeypatch):
+    env_file = tmp_path / "deliberate.env"
+    env_file.write_text("MQTT_WRITES_ENABLED=true\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MQTT_WRITES_ENABLED", raising=False)
+    assert mqtt_server.get_settings(str(env_file)).writes_enabled is True
+
+
+def test_real_environment_may_open_the_write_gate(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("MQTT_WRITES_ENABLED=false\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MQTT_WRITES_ENABLED", "true")
+    assert mqtt_server.get_settings().writes_enabled is True
+
+
+def test_merge_env_file_without_touching_os_environ(tmp_path, monkeypatch):
+    from mqtt_mcp.config import merge_env_file
+
+    (tmp_path / ".env").write_text("MQTT_WRITES_ENABLED=1\nMQTT_KEEPALIVE=30\n")
+    monkeypatch.chdir(tmp_path)
+    environ: dict[str, str] = {}
+    warnings = merge_env_file(None, environ)
+    assert environ == {"MQTT_KEEPALIVE": "30"}
+    assert len(warnings) == 1 and "MQTT_WRITES_ENABLED" in warnings[0]
+    environ = {}
+    assert merge_env_file(str(tmp_path / ".env"), environ) == []
+    assert environ == {"MQTT_WRITES_ENABLED": "1", "MQTT_KEEPALIVE": "30"}
+    with pytest.raises(ConfigError, match="does not exist"):
+        merge_env_file(str(tmp_path / "missing.env"), {})

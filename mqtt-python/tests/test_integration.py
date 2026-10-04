@@ -10,7 +10,6 @@ import asyncio
 import datetime
 import ipaddress
 import ssl
-import time
 
 import anyio
 import pytest
@@ -35,8 +34,12 @@ async def test_read_only_server_against_the_mock(broker, mock_node, observer, tm
         SPARKPLUG_GROUP_ID=group,
         SPARKPLUG_EDGE_NODE_ID="mcp-observer",
     ) as session:
-        info = await call(session, "get_broker_info")
-        assert info["data"]["connected"] is True
+
+        async def connected():
+            info = await call(session, "get_broker_info")
+            return info if info["data"]["connected"] else None
+
+        info = await eventually(connected)
         assert info["data"]["writes_enabled"] is False
 
         sub = await call(session, "subscribe_topic", topic=f"spBv1.0/{group}/#", qos=1)
@@ -78,6 +81,7 @@ async def test_read_only_server_against_the_mock(broker, mock_node, observer, tm
 
         # Writes are refused and nothing reaches the broker.
         observer.subscribe(f"itest-ro/{group}/#")
+        observer.subscribe(f"spBv1.0/{group}/DCMD/#")
         refused = await call(
             session, "publish_message", topic=f"itest-ro/{group}/x", payload="must-not-arrive"
         )
@@ -136,6 +140,7 @@ async def test_writes_commands_edge_node_and_will(
         )
         assert sent["success"] is True
         assert "PUBACK" in sent["data"]["delivery"]
+        assert sent["meta"]["outcome"] == "written" and sent["meta"]["request_sent"] is True
         received = await observer.wait_for(lambda m: m.topic == f"itest-rw/{group}/cmd")
         assert received.payload == b"hello"
 
@@ -224,8 +229,6 @@ async def test_writes_commands_edge_node_and_will(
         assert ndata["data"]["seq"] == 3
 
         # Cut the connection without a DISCONNECT: the broker publishes the NDEATH will.
-        before = await call(session, "read_messages", limit=1)
-        dropped_at = time.time()
         proxy.drop_connections()
         will = await observer.wait_for(lambda m: m.topic == f"spBv1.0/{group}/NDEATH/mcp-node")
         assert will.qos == 1
@@ -246,18 +249,16 @@ async def test_writes_commands_edge_node_and_will(
         assert gone["success"] is False and "not born" in gone["error"]
 
         # The subscription was restored: new mock data arrives after the reconnect.
+        after = (await call(session, "read_messages", limit=1))["meta"]["last_id"]
+
         async def fresh_data():
             read = await call(
                 session,
                 "read_messages",
                 topic_filter=f"spBv1.0/{group}/DDATA/edge-node-1/+",
-                since_id=before["meta"]["last_id"],
+                since_id=after,
             )
-            return [
-                m
-                for m in read["data"]
-                if datetime.datetime.fromisoformat(m["received_at"]).timestamp() > dropped_at
-            ]
+            return read["data"]
 
         assert await eventually(fresh_data)
 
@@ -430,3 +431,55 @@ async def test_mqtts_uses_tls(variant, expect_connected, broker, observer, proxy
             assert "CERTIFICATE_VERIFY_FAILED" in (info["last_error"] or "")
             refused = await call(session, "subscribe_topic", topic=topic)
             assert refused["success"] is False
+
+
+async def test_unacknowledged_publish_is_unknown_and_never_resent(
+    broker, observer, proxy_factory, tmp_path
+):
+    """No PUBACK: report outcome unknown, and never send the message a second time."""
+    proxy = proxy_factory().start()
+    topic = f"itest-once/{unique('topic')}"
+    observer.subscribe(topic)
+    async with mcp_session(
+        tmp_path,
+        MQTT_BROKER_URL=f"mqtt://127.0.0.1:{proxy.port}",
+        MQTT_WRITES_ENABLED="true",
+        MQTT_TOOL_TIMEOUT="1",
+    ) as session:
+
+        async def connected():
+            return (await call(session, "get_broker_info"))["data"]["connected"]
+
+        await eventually(connected)
+        proxy.hold_downstream = True  # the broker gets the PUBLISH, its PUBACK is lost
+        result = await call(session, "publish_message", topic=topic, payload="once", qos=1)
+        assert result["success"] is False
+        assert result["meta"]["outcome"] == "unknown"
+        assert result["meta"]["request_sent"] is True
+        assert "may have been applied; check before retrying" in result["error"]
+        await observer.wait_for(lambda m: m.topic == topic)
+
+        # Reconnect: paho would resend an unacknowledged QoS 1 message; the server
+        # withdrew it, so it must not reach the broker again.
+        proxy.hold_downstream = False
+        proxy.drop_connections()
+        await eventually(connected, timeout=20)
+        await asyncio.sleep(1.5)
+        assert len(observer.find(lambda m: m.topic == topic)) == 1
+
+
+async def test_shutdown_publishes_ndeath_for_a_born_node(broker, observer, tmp_path):
+    group = unique("itest-shutdown")
+    observer.subscribe(f"spBv1.0/{group}/#")
+    async with mcp_session(
+        tmp_path,
+        MQTT_BROKER_URL=broker.url,
+        MQTT_WRITES_ENABLED="true",
+        SPARKPLUG_GROUP_ID=group,
+        SPARKPLUG_EDGE_NODE_ID="mcp-node",
+    ) as session:
+        birth = await call(session, "publish_node_birth")
+        assert birth["success"] is True
+    # The MCP client closed the session: the server announced the node's death.
+    death = await observer.wait_for(lambda m: m.topic == f"spBv1.0/{group}/NDEATH/mcp-node")
+    assert metrics_of(decode_payload(death.payload)) == {"bdSeq": ("Int64", 0)}

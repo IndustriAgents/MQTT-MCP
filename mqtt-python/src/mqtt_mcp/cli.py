@@ -22,7 +22,9 @@ def _parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "configuration (environment variables; a .env file in the working directory\n"
-            "or one of its parents is loaded first, without overriding set variables):\n"
+            "or one of its parents is loaded first, without overriding set variables;\n"
+            "MQTT_WRITES_ENABLED from that automatically found file is ignored, it only\n"
+            "counts from the real environment or --env-file):\n"
             f"{env_help}"
         ),
     )
@@ -31,11 +33,17 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = _parser()
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.parse_args(sys.argv[1:] if argv is None else argv)
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="load settings from this file instead of an automatically found .env;"
+        " unlike that file, it may set MQTT_WRITES_ENABLED",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     from .mqtt_server import main as run_server
 
-    run_server()
+    run_server(env_file=args.env_file)
 
 
 if __name__ == "__main__":

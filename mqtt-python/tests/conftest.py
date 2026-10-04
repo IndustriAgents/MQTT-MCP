@@ -152,6 +152,8 @@ class Proxy:
         self.port = port or free_port()
         self.ssl_context = ssl_context
         self.first_packets: list[bytes] = []
+        #: While true, bytes from the broker to the client are dropped (no acks arrive).
+        self.hold_downstream = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
@@ -204,13 +206,15 @@ class Proxy:
         self._writers.update({writer, up_writer})
         first = True
 
-        async def pipe(src, dst, record):
+        async def pipe(src, dst, upstream):
             nonlocal first
             try:
                 while data := await src.read(65536):
-                    if record and first:
+                    if upstream and first:
                         self.first_packets.append(data)
                         first = False
+                    if not upstream and self.hold_downstream:
+                        continue
                     dst.write(data)
                     await dst.drain()
             except (OSError, asyncio.IncompleteReadError, ssl.SSLError):

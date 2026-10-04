@@ -130,6 +130,11 @@ class MessageBuffer:
         if since_id is not None and since_id + 1 < oldest_id:
             # Messages after since_id have already been pushed out of the buffer.
             meta["missed_messages"] = True
+        if since_id is not None and since_id > last_id:
+            meta["note"] = (
+                f"since_id {since_id} is newer than the newest message ({last_id}); ids start"
+                " again at 1 when the server restarts"
+            )
         return [m.to_dict() for m in selected], meta
 
 
@@ -262,6 +267,15 @@ class SparkplugRegistry:
                         "timestamp": metric.get("timestamp"),
                     }
         return decoded, None
+
+    def mark_unknown(self) -> None:
+        """This server lost its connection: deaths published meanwhile are missed, so
+        the online state of every node and device is unknown until it is heard from."""
+        with self._lock:
+            for node in self._nodes.values():
+                node["online"] = None
+                for device in node["devices"].values():
+                    device["online"] = None
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self._lock:

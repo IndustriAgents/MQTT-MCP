@@ -54,7 +54,9 @@ async def server(**env):
     env.setdefault("MQTT_TOOL_TIMEOUT", "0.5")
     mqtt_server.set_settings(load_settings(env))
     try:
-        async with create_connected_server_and_client_session(mqtt_server.mcp) as session:
+        async with create_connected_server_and_client_session(
+            mqtt_server.mcp._mcp_server
+        ) as session:
             yield session
     finally:
         mqtt_server.set_settings(None)
@@ -70,16 +72,18 @@ async def call(session, name, **arguments):
 
 
 async def test_server_info_reports_this_package():
-    from mqtt_mcp import __version__
+    import importlib.metadata
 
     mqtt_server.set_settings(load_settings({"MQTT_BROKER_URL": f"mqtt://127.0.0.1:{free_port()}"}))
     try:
-        async with create_connected_server_and_client_session(mqtt_server.mcp) as session:
+        async with create_connected_server_and_client_session(
+            mqtt_server.mcp._mcp_server
+        ) as session:
             init = await session.initialize()
     finally:
         mqtt_server.set_settings(None)
     assert init.serverInfo.name == "MQTT-Control"
-    assert init.serverInfo.version == __version__
+    assert init.serverInfo.version == importlib.metadata.version("mqtt-mcp")
 
 
 async def test_tool_list_and_annotations():
@@ -126,13 +130,18 @@ async def test_writes_are_disabled_by_default():
             assert result["success"] is False, name
             assert "MQTT_WRITES_ENABLED=true" in result["error"], name
             assert "Nothing was published" in result["error"], name
+            assert result["meta"]["outcome"] == "not_sent", name
+            assert result["meta"]["request_sent"] is False, name
 
 
-async def test_shared_subscriptions_need_writes():
+async def test_dollar_filters_other_than_sys_need_writes():
     async with server() as session:
-        result = await call(session, "subscribe_topic", topic="$share/group/sensors/#")
-    assert result["success"] is False
-    assert "MQTT_WRITES_ENABLED" in result["error"]
+        for topic in ("$share/group/sensors/#", "$queue/sensors/#", "$exclusive/sensors/#"):
+            result = await call(session, "subscribe_topic", topic=topic)
+            assert result["success"] is False, topic
+            assert "MQTT_WRITES_ENABLED" in result["error"], topic
+        sys_topics = await call(session, "subscribe_topic", topic="$SYS/broker/version")
+        assert "MQTT_WRITES_ENABLED" not in sys_topics["error"]  # fails only: not connected
 
 
 async def test_not_connected_is_reported_not_faked():
@@ -182,6 +191,18 @@ BAD_ARGUMENTS = [
     ("subscribe_topic", {"topic": "a/b+"}, "'+' must be a whole level"),
     ("subscribe_topic", {"topic": "a/b", "qos": -1}, "qos must be"),
     ("subscribe_topic", {"topic": 5}, "Invalid arguments"),
+    # Strict types: a boolean is never an integer, an integer never a boolean.
+    ("subscribe_topic", {"topic": "a/#", "qos": True}, "Invalid arguments"),
+    ("publish_message", {"topic": "a/b", "payload": "x", "qos": True}, "Invalid arguments"),
+    ("publish_message", {"topic": "a/b", "payload": "x", "retain": 1}, "Invalid arguments"),
+    ("read_messages", {"limit": True}, "Invalid arguments"),
+    ("read_messages", {"since_id": False}, "Invalid arguments"),
+    ("read_messages", {"limit": "5"}, "Invalid arguments"),
+    (
+        "publish_node_command",
+        {"metrics": [{"name": "m", "value": True, "type": "int32"}]},
+        "must be an integer",
+    ),
 ]
 
 
@@ -191,6 +212,8 @@ async def test_bad_arguments_return_success_false():
             result = await call(session, tool, **arguments)
             assert result["success"] is False, (tool, arguments)
             assert message in result["error"], (tool, arguments, result["error"])
+            if tool.startswith("publish_"):
+                assert result["meta"].get("outcome", "not_sent") == "not_sent", tool
 
 
 async def test_unsubscribe_unknown_topic():
@@ -240,14 +263,94 @@ async def test_list_sparkplug_nodes_before_discovery():
     assert "spBv1.0/#" in result["meta"]["note"]
 
 
-def test_unconfirmed_qos1_message_is_withdrawn():
-    """A QoS 1 publish that paho queued while offline must not go out later."""
+def _offline_manager():
     settings = load_settings({"MQTT_BROKER_URL": f"mqtt://127.0.0.1:{free_port()}"})
     manager = mqtt_server.MQTTClientManager(settings)
     manager.client = mqtt_server.build_client(settings)
+    return manager
+
+
+def test_unconfirmed_qos1_message_is_withdrawn():
+    """A QoS 1 publish that paho queued while offline must not go out later."""
+    manager = _offline_manager()
     info = manager.client.publish("a/b", b"x", qos=1)
     assert info.rc == mqtt.MQTT_ERR_NO_CONN
     assert info.mid in manager.client._out_messages  # paho would resend it on connect
-    assert manager._withdraw(info.mid) is True
+    assert manager._withdraw(info.mid) is True  # never written: not_sent
     assert info.mid not in manager.client._out_messages
+    assert manager._withdraw(info.mid) is None  # nothing left to withdraw
+
+
+def _queued_packet(mid, pos):
+    return {"command": 0x30, "mid": mid, "qos": 0, "pos": pos, "to_process": 1, "packet": b"x"}
+
+
+def test_withdraw_tells_unsent_from_possibly_sent():
+    manager = _offline_manager()
+    queue = manager.client._out_packet
+    queue.append(_queued_packet(7, 0))  # QoS 0, not started
+    assert manager._withdraw(7) is True and not queue
+    queue.append(_queued_packet(8, 3))  # QoS 0, partly written
+    assert manager._withdraw(8) is False
+    queue.clear()
+    assert manager._withdraw(9) is None  # QoS 0 already written: nothing held
+    info = manager.client.publish("a/b", b"x", qos=1)
+    message = manager.client._out_messages[info.mid]
+    message.state = mqtt.mqtt_ms_wait_for_puback  # in flight, packet already written
     assert manager._withdraw(info.mid) is False
+    info = manager.client.publish("a/b", b"x", qos=1)
+    manager.client._out_messages[info.mid].dup = True  # resent after a reconnect
+    assert manager._withdraw(info.mid) is False
+
+
+async def test_birth_refused_without_a_registered_will(monkeypatch):
+    """If the CONNECT that carried the will was refused, no NBIRTH may go out."""
+    published = []
+
+    async def no_restart(self, bd_seq):  # reconnected, but the broker holds no will
+        self.connected = True
+        self.will_active = False
+
+    async def connected(self):
+        return None
+
+    async def record(self, *args, **kwargs):
+        published.append(args)
+        return {"mid": 1, "generation": self.generation, "delivery": "x"}
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "_restart_with_will", no_restart)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", record)
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        result = await call(session, "publish_node_birth", metrics=[])
+    assert result["success"] is False
+    assert "no NDEATH will" in result["error"]
+    assert result["meta"] == {"outcome": "not_sent", "request_sent": False}
+    assert published == []
+
+
+def test_refused_connect_keeps_the_will_for_the_next_attempt():
+    from paho.mqtt.reasoncodes import ReasonCode
+
+    manager = _offline_manager()
+    client = manager.client
+    client.will_set("spBv1.0/g/NDEATH/n", b"x", qos=1)
+    manager._will_bd_seq = 4
+    refused = ReasonCode(mqtt.CONNACK >> 4, identifier=0x87)  # not authorized
+    manager._on_connect(client, None, None, refused, None)
+    manager._on_disconnect(client, None, None, refused, None)
+    assert manager._will_bd_seq == 4 and client._will is True
+    assert "refused" in manager.last_refusal
+    ok = ReasonCode(mqtt.CONNACK >> 4, identifier=0)
+    manager._on_connect(client, None, None, ok, None)
+    assert manager.will_active is True and manager.bd_seq == 4
+    from mqtt_mcp import sparkplug_b_pb2 as pb
+
+    manager.registry.observe("spBv1.0/g/NDATA/other", pb.Payload(seq=1).SerializeToString(), 0)
+    lost = ReasonCode(mqtt.DISCONNECT >> 4, identifier=0x80)
+    manager.node_born = True
+    manager._on_disconnect(client, None, None, lost, None)
+    assert manager.will_active is False and manager.node_born is False
+    # Deaths published while this server was away are missed: online is now unknown.
+    assert manager.registry.snapshot()[0]["online"] is None
+    assert client._will is False  # the broker published it; the next birth needs a new one

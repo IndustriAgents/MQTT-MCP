@@ -33,7 +33,11 @@ class FakeClient:
 
     def publish(self, topic, payload, qos=0, retain=False):
         self.published.append((topic, payload, qos, retain))
-        return SimpleNamespace(rc=mqtt.MQTT_ERR_SUCCESS, wait_for_publish=lambda timeout: None)
+        return SimpleNamespace(
+            rc=mqtt.MQTT_ERR_SUCCESS,
+            wait_for_publish=lambda timeout: None,
+            is_published=lambda: True,
+        )
 
     def __getattr__(self, name):  # disconnect, loop_stop, will_set, ...
         return lambda *args, **kwargs: self.calls.append(name)

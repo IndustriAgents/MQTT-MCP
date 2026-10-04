@@ -2,7 +2,7 @@
 
 Nothing here runs at import time: ``load_settings()`` reads a mapping (the
 process environment by default) when it is called, which ``main()`` does after
-``load_dotenv()`` has merged a ``.env`` file into the environment.
+``merge_env_file()`` has merged a ``.env`` file into the environment.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+from dotenv import dotenv_values, find_dotenv
 
 from .sparkplug import validate_id
 
@@ -46,8 +48,47 @@ ENV_VARS = {
 }
 
 
+#: Variables that open a safety gate. They count only when they come from the real
+#: process environment or an explicit ``--env-file``, never from a .env file that
+#: was found automatically: with a direct launch, the working directory is the MCP
+#: client's project, which may not be trusted.
+GATE_VARS = ("MQTT_WRITES_ENABLED",)
+
+
 class ConfigError(ValueError):
     """The environment holds an invalid setting."""
+
+
+def merge_env_file(env_file: str | None = None, environ=None) -> list[str]:
+    """Merge a .env file into ``environ`` (default ``os.environ``); return warnings.
+
+    Variables already set in the environment always win. With ``env_file`` (the
+    ``--env-file`` option) every variable in that file counts. Without it, the
+    nearest ``.env`` in the working directory or a parent is used for connection
+    settings, but gate variables (GATE_VARS) in it are ignored with a warning.
+    """
+    environ = os.environ if environ is None else environ
+    if env_file is not None:
+        if not os.path.isfile(env_file):
+            raise ConfigError(f"--env-file {env_file!r} does not exist or is not a file")
+        path, explicit = env_file, True
+    else:
+        path, explicit = find_dotenv(usecwd=True), False
+        if not path:
+            return []
+    warnings = []
+    for key, value in dotenv_values(path).items():
+        if value is None or key in environ:
+            continue
+        if key in GATE_VARS and not explicit:
+            warnings.append(
+                f"Ignoring {key} from {path}: a .env file found automatically cannot change a"
+                " safety gate. Set it in the server's real environment (for example the MCP"
+                " client's env block) or pass the file with --env-file."
+            )
+            continue
+        environ[key] = value
+    return warnings
 
 
 @dataclass(frozen=True)

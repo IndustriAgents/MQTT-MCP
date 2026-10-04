@@ -270,3 +270,16 @@ def test_registry_tolerates_unknown_datatypes_and_aliases():
     assert node["online"] is True and node["last_seq"] == 1
     _, error = registry.observe("spBv1.0/g/NDATA/n", b"\xff\xff", 2.0)
     assert "not a valid Sparkplug B payload" in error
+
+
+def test_registry_forgets_online_state_when_this_server_loses_its_connection():
+    from mqtt_mcp.inbox import SparkplugRegistry
+
+    registry = SparkplugRegistry()
+    registry.observe("spBv1.0/g/NDATA/n", pb.Payload(seq=1).SerializeToString(), 0.0)
+    registry.observe("spBv1.0/g/DDATA/n/d", pb.Payload(seq=2).SerializeToString(), 0.0)
+    (node,) = registry.snapshot()
+    assert node["online"] is True and node["devices"][0]["online"] is True
+    registry.mark_unknown()  # deaths published while we were away are missed
+    (node,) = registry.snapshot()
+    assert node["online"] is None and node["devices"][0]["online"] is None
