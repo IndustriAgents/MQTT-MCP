@@ -250,3 +250,23 @@ def test_parse_topic():
 def test_invalid_ids(bad):
     with pytest.raises(ValueError):
         sparkplug.validate_id(bad, "device_id")
+
+
+def test_registry_tolerates_unknown_datatypes_and_aliases():
+    from mqtt_mcp.inbox import SparkplugRegistry
+
+    registry = SparkplugRegistry()
+    birth = pb.Payload(seq=0)
+    birth.metrics.add(name="odd", datatype=99, int_value=1)
+    birth.metrics.add(name="level", alias=7, datatype=pb.Int16, int_value=0xFFFF)
+    decoded, error = registry.observe("spBv1.0/g/NBIRTH/n", birth.SerializeToString(), 0.0)
+    assert error is None
+    assert decoded["metrics"][0]["datatype"] == "Unknown(99)"
+    data = pb.Payload(seq=1)
+    data.metrics.add(alias=7, int_value=0xFFFE)  # alias only, no datatype: Int16 from the birth
+    registry.observe("spBv1.0/g/NDATA/n", data.SerializeToString(), 1.0)
+    (node,) = registry.snapshot()
+    assert node["metrics"]["level"]["value"] == -2
+    assert node["online"] is True and node["last_seq"] == 1
+    _, error = registry.observe("spBv1.0/g/NDATA/n", b"\xff\xff", 2.0)
+    assert "not a valid Sparkplug B payload" in error

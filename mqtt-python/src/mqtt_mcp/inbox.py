@@ -193,6 +193,7 @@ class SparkplugRegistry:
                         "group_id": node_key[0],
                         "edge_node_id": node_key[1],
                         "bd_seq": None,
+                        "last_seq": None,
                         "devices": {},
                     }
                 )
@@ -215,10 +216,12 @@ class SparkplugRegistry:
                 for metric in decoded["metrics"]:
                     if metric["name"] is None:
                         continue
-                    if metric["datatype"] is not None:
+                    try:
                         types.by_name[metric["name"]] = sparkplug.pb.DataType.Value(
                             metric["datatype"]
                         )
+                    except (TypeError, ValueError):  # no datatype, or not a known one
+                        pass
                     if "alias" in metric:
                         types.alias_names[metric["alias"]] = metric["name"]
                 self._types[type_key] = types
