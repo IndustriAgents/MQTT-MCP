@@ -6,9 +6,13 @@ broker listens.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import socket
+import threading
 from contextlib import asynccontextmanager
 
+import anyio
 import paho.mqtt.client as mqtt
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
@@ -29,6 +33,8 @@ READ_TOOLS = {
     "list_sparkplug_nodes",
     "decode_sparkplug_payload",
 }
+METRIC = [{"name": "m", "value": 1, "type": "int32"}]
+
 WRITE_TOOLS = {
     "publish_message": {"topic": "a/b", "payload": "x"},
     "publish_node_birth": {"metrics": []},
@@ -90,12 +96,14 @@ async def test_tool_list_and_annotations():
     async with server() as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
     assert set(tools) == READ_TOOLS | set(WRITE_TOOLS)
+    assert set(WRITE_TOOLS) == mqtt_server.WRITE_TOOLS  # the deadline's write list
     for name in READ_TOOLS:
         assert tools[name].annotations.readOnlyHint is True, name
     for name in WRITE_TOOLS:
         tool = tools[name]
         assert tool.annotations.readOnlyHint is False, name
         assert tool.annotations.destructiveHint is True, name
+        assert tool.annotations.idempotentHint is False, name
         assert tool.description.startswith("WRITE:"), name
         assert "MQTT_WRITES_ENABLED=true" in tool.description, name
 
@@ -380,3 +388,75 @@ async def test_message_written_before_a_drop_is_unknown(monkeypatch):
     assert result["meta"] == {"outcome": "unknown", "request_sent": True}
     assert "may have been applied; check before retrying" in result["error"]
     assert info["data"]["sparkplug"]["node_born"] is False
+
+
+async def test_every_tool_call_has_an_overall_deadline(monkeypatch):
+    """A broker operation that never returns must not hang the call."""
+
+    async def hang(self, *args, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "publish", hang)
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "subscribe", hang)
+    async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.1") as session:
+        with anyio.fail_after(20):
+            write = await call(session, "publish_message", topic="a/b", payload="x")
+            read = await call(session, "subscribe_topic", topic="a/#")
+    assert write["success"] is False
+    assert write["meta"]["outcome"] == "unknown" and write["meta"]["request_sent"] is True
+    assert "overall deadline" in write["error"]
+    assert "may have been applied; check before retrying" in write["error"]
+    assert read["success"] is False and "overall deadline" in read["error"]
+    assert "outcome" not in read["meta"]
+
+
+class Peer:
+    """A TCP peer that answers every connection with garbage (or with nothing)."""
+
+    def __init__(self, reply: bytes | None) -> None:
+        self.reply = reply
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.port = self.sock.getsockname()[1]
+        self.connections: list[socket.socket] = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.connections.append(conn)
+            if self.reply is not None:
+                try:
+                    conn.sendall(self.reply)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        self.sock.close()
+        for conn in self.connections:
+            conn.close()
+
+
+@pytest.mark.parametrize("reply", [b"\xf0\x05not-mqtt-at-all", None], ids=["garbage", "silent"])
+async def test_a_peer_that_is_not_a_broker_gives_clean_failures(reply):
+    peer = Peer(reply)
+    try:
+        async with server(
+            MQTT_BROKER_URL=f"mqtt://127.0.0.1:{peer.port}",
+            MQTT_WRITES_ENABLED="true",
+            MQTT_TOOL_TIMEOUT="0.5",
+        ) as session:
+            with anyio.fail_after(30):
+                info = await call(session, "get_broker_info")
+                read = await call(session, "subscribe_topic", topic="a/#")
+                write = await call(session, "publish_device_command", device_id="d", metrics=METRIC)
+    finally:
+        peer.close()
+    assert info["data"]["connected"] is False
+    assert read["success"] is False and "Not connected" in read["error"]
+    assert write["success"] is False
+    assert write["meta"] == {"outcome": "not_sent", "request_sent": False, "device_id": "d"}

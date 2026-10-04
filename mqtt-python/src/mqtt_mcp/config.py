@@ -2,7 +2,8 @@
 
 Nothing here runs at import time: ``load_settings()`` reads a mapping (the
 process environment by default) when it is called, which ``main()`` does after
-``merge_env_file()`` has merged a ``.env`` file into the environment.
+``merge_env_file()`` has merged a .env file (``--env-file``, or
+``mqtt-python/.env`` of a source checkout) into the environment.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from dotenv import dotenv_values, find_dotenv
+from dotenv import dotenv_values
 
 from .sparkplug import validate_id
 
@@ -49,23 +50,54 @@ ENV_VARS = {
 
 
 #: Variables that open a safety gate. They count only when they come from the real
-#: process environment or an explicit ``--env-file``, never from a .env file that
-#: was found automatically: with a direct launch, the working directory is the MCP
-#: client's project, which may not be trusted.
+#: process environment or an explicit ``--env-file``, never from the automatically
+#: loaded .env.
 GATE_VARS = ("MQTT_WRITES_ENABLED",)
+
+#: Prefixes of the variables this server reads. The automatically loaded .env may
+#: set only these (minus GATE_VARS); PATH, PYTHON*, LD_PRELOAD and the like are
+#: ignored with a warning.
+OWN_PREFIXES = ("MQTT_", "SPARKPLUG_")
 
 
 class ConfigError(ValueError):
     """The environment holds an invalid setting."""
 
 
+def implicit_env_file() -> str | None:
+    """The .env that is loaded without --env-file, or None.
+
+    Only ``mqtt-python/.env`` of a source checkout counts, found relative to this
+    package's source (``mqtt-python/src/mqtt_mcp/``). The working directory and its
+    parents are never searched: with a direct launch the working directory is the
+    MCP client's project, which may not be trusted, and settings such as the broker
+    decide where a write goes. An installed package (site-packages) has no implicit
+    .env at all.
+    """
+    package_dir = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.dirname(package_dir)
+    project_dir = os.path.dirname(src_dir)
+    if os.path.basename(src_dir) != "src":
+        return None
+    try:
+        with open(os.path.join(project_dir, "pyproject.toml"), encoding="utf-8") as f:
+            if 'name = "mqtt-mcp"' not in f.read():
+                return None
+    except OSError:
+        return None
+    candidate = os.path.join(project_dir, ".env")
+    return candidate if os.path.isfile(candidate) else None
+
+
 def merge_env_file(env_file: str | None = None, environ=None) -> list[str]:
     """Merge a .env file into ``environ`` (default ``os.environ``); return warnings.
 
     Variables already set in the environment always win. With ``env_file`` (the
-    ``--env-file`` option) every variable in that file counts. Without it, the
-    nearest ``.env`` in the working directory or a parent is used for connection
-    settings, but gate variables (GATE_VARS) in it are ignored with a warning.
+    ``--env-file`` option) every variable in that file counts. Without it, only
+    ``implicit_env_file()`` is read, and only for this server's own variables
+    (OWN_PREFIXES): gate variables (GATE_VARS) and anything else are ignored with
+    a warning. Names are compared case-insensitively and without an ``export ``
+    prefix, because Windows upper-cases environment names.
     """
     environ = os.environ if environ is None else environ
     if env_file is not None:
@@ -73,20 +105,23 @@ def merge_env_file(env_file: str | None = None, environ=None) -> list[str]:
             raise ConfigError(f"--env-file {env_file!r} does not exist or is not a file")
         path, explicit = env_file, True
     else:
-        path, explicit = find_dotenv(usecwd=True), False
+        path, explicit = implicit_env_file(), False
         if not path:
             return []
     warnings = []
     for key, value in dotenv_values(path).items():
         name = _normalise(key)
-        if name in GATE_VARS and not explicit:
-            # Matched case-insensitively: Windows upper-cases environment names, so
-            # mqtt_writes_enabled in a .env would open the gate there.
+        if not explicit and name in GATE_VARS:
             warnings.append(
-                f"Ignoring {name} (written as {key!r}) from {path}: a .env file found"
-                " automatically cannot change a safety gate. Set it in the server's real"
-                " environment (for example the MCP client's env block) or pass the file with"
-                " --env-file."
+                f"Ignoring {name} (written as {key!r}) from {path}: the automatically loaded"
+                " .env cannot change a safety gate. Set it in the server's real environment"
+                " (for example the MCP client's env block) or pass the file with --env-file."
+            )
+            continue
+        if not explicit and not name.startswith(OWN_PREFIXES):
+            warnings.append(
+                f"Ignoring {key!r} from {path}: the automatically loaded .env may only set"
+                f" {' and '.join(p + '*' for p in OWN_PREFIXES)} variables."
             )
             continue
         if value is None or key in environ:

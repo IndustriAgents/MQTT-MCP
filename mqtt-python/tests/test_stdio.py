@@ -198,24 +198,23 @@ def test_stdout_check_catches_a_stray_print(tmp_path):
     assert any("stray debug output" in line for line in stray)
 
 
-def test_implicit_dotenv_cannot_enable_writes(tmp_path):
-    """A .env in the working directory (the MCP client's project) may set the broker
-    but not the write gate."""
+def test_dotenv_in_the_working_directory_is_not_read(tmp_path):
+    """The working directory is the MCP client's project: its .env is never loaded."""
     port = free_port()
     (tmp_path / ".env").write_text(
         f"MQTT_BROKER_URL=mqtt://127.0.0.1:{port}\nMQTT_WRITES_ENABLED=true\n"
     )
     env = server_env(MQTT_TOOL_TIMEOUT="0.5")
-    del env["MQTT_WRITES_ENABLED"], env["MQTT_BROKER_URL"]  # only the .env sets them
+    del env["MQTT_WRITES_ENABLED"], env["MQTT_BROKER_URL"]  # only the .env would set them
     calls = {"get_broker_info": {}, "publish_message": {"topic": "a/b", "payload": "x"}}
     responses, _, stray, stderr = drive([str(SERVER_EXE)], tmp_path, env, calls)
     assert stray == []
     info = responses[3]["result"]["structuredContent"]["data"]
-    assert info["broker"] == f"mqtt://127.0.0.1:{port}"  # connection settings are used
+    assert info["broker"] != f"mqtt://127.0.0.1:{port}"
     assert info["writes_enabled"] is False
     published = responses[4]["result"]["structuredContent"]
     assert published["success"] is False and "Writes are disabled" in published["error"]
-    assert "Ignoring MQTT_WRITES_ENABLED" in " ".join(stderr.split())
+    assert str(tmp_path) not in stderr
 
 
 def test_explicit_env_file_can_enable_writes(tmp_path):

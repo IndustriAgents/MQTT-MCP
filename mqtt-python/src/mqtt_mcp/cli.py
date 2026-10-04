@@ -21,10 +21,11 @@ def _parser() -> argparse.ArgumentParser:
             " client on stdin.\nRead-only unless MQTT_WRITES_ENABLED=true."
         ),
         epilog=(
-            "configuration (environment variables; a .env file in the working directory\n"
-            "or one of its parents is loaded first, without overriding set variables;\n"
-            "MQTT_WRITES_ENABLED from that automatically found file is ignored, it only\n"
-            "counts from the real environment or --env-file):\n"
+            "configuration (environment variables, which win over files; --env-file PATH\n"
+            "loads a file first; without it, only mqtt-python/.env of a source checkout is\n"
+            "loaded, never the working directory, and only for MQTT_*/SPARKPLUG_* settings\n"
+            "other than MQTT_WRITES_ENABLED, which counts only from the real environment\n"
+            "or --env-file):\n"
             f"{env_help}"
         ),
     )
@@ -36,8 +37,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--env-file",
         metavar="PATH",
-        help="load settings from this file instead of an automatically found .env;"
-        " unlike that file, it may set MQTT_WRITES_ENABLED",
+        help="load settings from this file instead of mqtt-python/.env; unlike that"
+        " file, it may set MQTT_WRITES_ENABLED",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 

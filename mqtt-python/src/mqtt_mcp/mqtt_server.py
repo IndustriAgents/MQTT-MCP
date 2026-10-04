@@ -616,9 +616,10 @@ def get_settings(env_file: str | None = None) -> Settings:
     """Load settings once, after merging a .env file into the environment.
 
     Variables already set in the environment take precedence. ``env_file`` is
-    the explicit ``--env-file``; without it the nearest ``.env`` in the working
-    directory or a parent is used, except that it cannot set MQTT_WRITES_ENABLED
-    (a warning on stderr says so).
+    the explicit ``--env-file``; without it only ``mqtt-python/.env`` of a source
+    checkout is read (never the working directory), and only for MQTT_* and
+    SPARKPLUG_* variables other than MQTT_WRITES_ENABLED (warnings on stderr say
+    what was ignored).
     """
     global _settings
     if _settings is None:
@@ -645,16 +646,64 @@ async def mqtt_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         await manager.stop()
 
 
-class EnvelopeFastMCP(FastMCP):
-    """FastMCP that reports argument validation errors in the result envelope.
+def overall_deadline(settings: Settings) -> float:
+    """Upper bound for one tool call, so that no call can hang without an outcome.
 
-    FastMCP validates arguments against the tool's signature before the tool
-    runs and turns a failure into a protocol-level tool error. Here such errors
-    come back as ``{success: false, error: "Invalid arguments: ..."}``, like
-    every other failure.
+    Every broker wait inside a tool is bounded by MQTT_TOOL_TIMEOUT; the longest
+    chain (a first NBIRTH: connection, session restart with the will, connection,
+    publish) is about six of them. The deadline adds headroom for a call that
+    queues behind another one.
+    """
+    return 8 * settings.tool_timeout + 2.0
+
+
+#: Tools that publish (all gated by MQTT_WRITES_ENABLED).
+WRITE_TOOLS = frozenset(
+    {
+        "publish_message",
+        "publish_node_birth",
+        "publish_node_death",
+        "publish_device_birth",
+        "publish_device_death",
+        "publish_node_data",
+        "publish_device_data",
+        "publish_node_command",
+        "publish_device_command",
+    }
+)
+
+
+class EnvelopeFastMCP(FastMCP):
+    """FastMCP with the suite's envelope for every outcome of a tool call.
+
+    - FastMCP validates arguments against the tool's signature before the tool
+      runs and turns a failure into a protocol-level tool error. Here such errors
+      come back as ``{success: false, error: "Invalid arguments: ..."}``.
+    - Every call has an overall deadline (``overall_deadline``). A write that
+      runs out of time is reported as outcome "unknown" (it may have been sent);
+      a read gets a clean error.
     """
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
+        deadline = overall_deadline(get_settings())
+        try:
+            return await asyncio.wait_for(self._call_enveloped(name, arguments), deadline)
+        except asyncio.TimeoutError:
+            if name in WRITE_TOOLS:
+                return _fail(
+                    f"{name} did not finish within its overall deadline of {deadline:g}s."
+                    f" {UNKNOWN_HINT}",
+                    tool=name,
+                    outcome="unknown",
+                    request_sent=True,
+                )
+            return _fail(
+                f"{name} did not finish within its overall deadline of {deadline:g}s;"
+                " nothing was changed",
+                tool=name,
+            )
+
+    async def _call_enveloped(self, name: str, arguments: dict[str, Any]):
         try:
             return await super().call_tool(name, arguments)
         except ToolError as exc:
@@ -1088,7 +1137,9 @@ async def publish_node_birth(
             await m.require_connection()
             reconnected = False
             if not m.will_active:
-                await m._restart_with_will(m._next_bd_seq)
+                # Shielded: if the call's overall deadline cancels it, the session
+                # restart still finishes, so the client is never left stopped.
+                await asyncio.shield(m._restart_with_will(m._next_bd_seq))
                 reconnected = True
             with m._lock:
                 will_ok = m.connected and m.will_active and m.bd_seq is not None

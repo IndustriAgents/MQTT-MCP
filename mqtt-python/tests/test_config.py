@@ -172,11 +172,21 @@ def test_configuration_is_read_when_the_server_starts_not_at_import(monkeypatch)
     assert not hasattr(mqtt_server, "MQTT_HOST")
 
 
-def test_dotenv_is_loaded_before_reading_settings(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text(
+@pytest.fixture
+def project_env(tmp_path, monkeypatch):
+    """Point the implicit .env at tmp_path/mqtt-python/.env (written by the test)."""
+    from mqtt_mcp import config
+
+    path = tmp_path / "mqtt-python" / ".env"
+    path.parent.mkdir()
+    monkeypatch.setattr(config, "implicit_env_file", lambda: str(path) if path.exists() else None)
+    return path
+
+
+def test_dotenv_is_loaded_before_reading_settings(project_env, monkeypatch):
+    project_env.write_text(
         "MQTT_BROKER_URL=mqtt://dotenv-host:1777\nSPARKPLUG_GROUP_ID=from-dotenv\n"
     )
-    monkeypatch.chdir(tmp_path)
     for name in ("MQTT_BROKER_URL", "SPARKPLUG_GROUP_ID"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SPARKPLUG_EDGE_NODE_ID", "from-env")
@@ -186,21 +196,14 @@ def test_dotenv_is_loaded_before_reading_settings(tmp_path, monkeypatch):
     assert s.edge_node_id == "from-env"
 
 
-def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text("MQTT_BROKER_URL=mqtt://dotenv-host:1777\n")
-    monkeypatch.chdir(tmp_path)
+def test_real_environment_wins_over_dotenv(project_env, monkeypatch):
+    project_env.write_text("MQTT_BROKER_URL=mqtt://dotenv-host:1777\n")
     monkeypatch.setenv("MQTT_BROKER_URL", "mqtt://env-host:1666")
     assert mqtt_server.get_settings().host == "env-host"
 
 
-def test_implicit_dotenv_cannot_open_the_write_gate(tmp_path, monkeypatch, caplog):
-    project = tmp_path / "client-project" / "sub"
-    project.mkdir(parents=True)
-    # Found automatically, from a parent of the working directory.
-    (tmp_path / "client-project" / ".env").write_text(
-        "MQTT_WRITES_ENABLED=true\nMQTT_BROKER_URL=mqtt://dotenv-host:1777\n"
-    )
-    monkeypatch.chdir(project)
+def test_implicit_dotenv_cannot_open_the_write_gate(project_env, monkeypatch, caplog):
+    project_env.write_text("MQTT_WRITES_ENABLED=true\nMQTT_BROKER_URL=mqtt://dotenv-host:1777\n")
     monkeypatch.delenv("MQTT_WRITES_ENABLED", raising=False)
     monkeypatch.delenv("MQTT_BROKER_URL", raising=False)
     with caplog.at_level("WARNING", logger="mqtt_mcp"):
@@ -214,32 +217,48 @@ def test_implicit_dotenv_cannot_open_the_write_gate(tmp_path, monkeypatch, caplo
 def test_explicit_env_file_may_open_the_write_gate(tmp_path, monkeypatch):
     env_file = tmp_path / "deliberate.env"
     env_file.write_text("MQTT_WRITES_ENABLED=true\n")
-    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("MQTT_WRITES_ENABLED", raising=False)
     assert mqtt_server.get_settings(str(env_file)).writes_enabled is True
 
 
-def test_real_environment_may_open_the_write_gate(tmp_path, monkeypatch):
-    (tmp_path / ".env").write_text("MQTT_WRITES_ENABLED=false\n")
-    monkeypatch.chdir(tmp_path)
+def test_real_environment_may_open_the_write_gate(project_env, monkeypatch):
+    project_env.write_text("MQTT_WRITES_ENABLED=false\n")
     monkeypatch.setenv("MQTT_WRITES_ENABLED", "true")
     assert mqtt_server.get_settings().writes_enabled is True
 
 
-def test_merge_env_file_without_touching_os_environ(tmp_path, monkeypatch):
+def test_implicit_dotenv_sets_only_this_servers_variables(project_env):
     from mqtt_mcp.config import merge_env_file
 
-    (tmp_path / ".env").write_text("MQTT_WRITES_ENABLED=1\nMQTT_KEEPALIVE=30\n")
-    monkeypatch.chdir(tmp_path)
+    project_env.write_text(
+        "MQTT_KEEPALIVE=30\nSPARKPLUG_GROUP_ID=g\nPATH=/evil\nPYTHONPATH=/evil\n"
+        "LD_PRELOAD=/evil.so\nDYLD_INSERT_LIBRARIES=/evil.dylib\nHOME=/tmp\n"
+    )
+    environ: dict[str, str] = {}
+    warnings = merge_env_file(None, environ)
+    assert environ == {"MQTT_KEEPALIVE": "30", "SPARKPLUG_GROUP_ID": "g"}
+    ignored = " ".join(warnings)
+    for name in ("PATH", "PYTHONPATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "HOME"):
+        assert f"Ignoring '{name}'" in ignored
+    # An explicit --env-file is honoured as written.
+    environ = {}
+    assert merge_env_file(str(project_env), environ) == []
+    assert environ["PATH"] == "/evil" and environ["MQTT_KEEPALIVE"] == "30"
+
+
+def test_merge_env_file_gate_and_errors(project_env):
+    from mqtt_mcp.config import merge_env_file
+
+    project_env.write_text("MQTT_WRITES_ENABLED=1\nMQTT_KEEPALIVE=30\n")
     environ: dict[str, str] = {}
     warnings = merge_env_file(None, environ)
     assert environ == {"MQTT_KEEPALIVE": "30"}
     assert len(warnings) == 1 and "MQTT_WRITES_ENABLED" in warnings[0]
     environ = {}
-    assert merge_env_file(str(tmp_path / ".env"), environ) == []
+    assert merge_env_file(str(project_env), environ) == []
     assert environ == {"MQTT_WRITES_ENABLED": "1", "MQTT_KEEPALIVE": "30"}
     with pytest.raises(ConfigError, match="does not exist"):
-        merge_env_file(str(tmp_path / "missing.env"), {})
+        merge_env_file(str(project_env.parent / "missing.env"), {})
 
 
 @pytest.mark.parametrize(
@@ -252,13 +271,48 @@ def test_merge_env_file_without_touching_os_environ(tmp_path, monkeypatch):
         '  MQTT_WRITES_ENABLED = "yes"',
     ],
 )
-def test_implicit_dotenv_gate_is_matched_case_insensitively(tmp_path, monkeypatch, line):
+def test_implicit_dotenv_gate_is_matched_case_insensitively(project_env, line):
     """Windows upper-cases environment names: any spelling of the gate is refused."""
     from mqtt_mcp.config import merge_env_file
 
-    (tmp_path / ".env").write_text(line + "\nMQTT_KEEPALIVE=30\n")
-    monkeypatch.chdir(tmp_path)
+    project_env.write_text(line + "\nMQTT_KEEPALIVE=30\n")
     environ: dict[str, str] = {}
     warnings = merge_env_file(None, environ)
     assert environ == {"MQTT_KEEPALIVE": "30"}
     assert len(warnings) == 1 and "Ignoring MQTT_WRITES_ENABLED" in warnings[0]
+
+
+def test_dotenv_in_working_directory_or_parent_is_not_read(tmp_path, monkeypatch):
+    from mqtt_mcp.config import merge_env_file
+
+    workdir = tmp_path / "client-project" / "sub"
+    workdir.mkdir(parents=True)
+    (tmp_path / "client-project" / ".env").write_text("MQTT_BROKER_URL=mqtt://parent-env:1\n")
+    (workdir / ".env").write_text("MQTT_BROKER_URL=mqtt://cwd-env:1\nMQTT_KEEPALIVE=7\n")
+    monkeypatch.chdir(workdir)
+    environ: dict[str, str] = {}
+    merge_env_file(None, environ)
+    assert environ.get("MQTT_BROKER_URL") not in ("mqtt://parent-env:1", "mqtt://cwd-env:1")
+    assert environ.get("MQTT_KEEPALIVE") != "7"
+
+
+def test_implicit_env_file_location(tmp_path, monkeypatch):
+    from mqtt_mcp import config
+
+    # Installed into site-packages: no implicit .env at all.
+    installed = tmp_path / "site-packages" / "mqtt_mcp" / "config.py"
+    monkeypatch.setattr(config, "__file__", str(installed))
+    (tmp_path / "site-packages" / ".env").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "site-packages" / ".env").write_text("MQTT_KEEPALIVE=1\n")
+    assert config.implicit_env_file() is None
+    # A source checkout: <project>/src/mqtt_mcp/config.py -> <project>/.env only.
+    project = tmp_path / "checkout" / "mqtt-python"
+    (project / "src" / "mqtt_mcp").mkdir(parents=True)
+    (project / "pyproject.toml").write_text('[project]\nname = "mqtt-mcp"\n')
+    monkeypatch.setattr(config, "__file__", str(project / "src" / "mqtt_mcp" / "config.py"))
+    assert config.implicit_env_file() is None  # no .env yet
+    (project / ".env").write_text("MQTT_KEEPALIVE=1\n")
+    assert config.implicit_env_file() == str(project / ".env")
+    # Some other project's src/ layout does not count.
+    (project / "pyproject.toml").write_text('[project]\nname = "other"\n')
+    assert config.implicit_env_file() is None
