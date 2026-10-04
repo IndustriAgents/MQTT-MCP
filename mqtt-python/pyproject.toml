@@ -8,6 +8,8 @@ version = "0.2.0"
 description = "MQTT + Sparkplug B MCP server"
 requires-python = ">=3.10"
 dependencies = [
+    # Imported directly (task groups, cancel scopes); 4.5 is mcp 1.12's own floor.
+    "anyio>=4.5",
     "mcp[cli]>=1.12,<2",
     # The client uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
     "paho-mqtt>=2.0,<3",
@@ -15,6 +17,10 @@ dependencies = [
     # oldest runtime that loads on Python 3.14 (checked by CI's lowest-direct job).
     "protobuf>=5.27",
     "python-dotenv>=1.0",
+    # Imported directly (StrictInt, StrictBool, ValidationError). pydantic-core has no
+    # Python 3.14 wheels before pydantic 2.12.
+    "pydantic>=2.8,<3; python_version < '3.14'",
+    "pydantic>=2.12,<3; python_version >= '3.14'",
 ]
 
 [project.scripts]
