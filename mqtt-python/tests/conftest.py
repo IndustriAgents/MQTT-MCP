@@ -39,6 +39,7 @@ MOCK_DIR = REPO / "mqtt-mock-server"
 MOCK_SCRIPT = MOCK_DIR / "mqtt_mock_server.py"
 BIN = Path(sys.executable).parent
 SERVER_EXE = BIN / "mqtt-mcp"
+WATCHDOG = Path(__file__).resolve().parent / "watchdog.py"
 
 #: Every variable the server reads; tests set all of them so that a stray .env
 #: file can never change what is under test (.env values never override set variables).
@@ -121,8 +122,13 @@ def broker():
     with tempfile.TemporaryDirectory() as tmp:
         conf = Path(tmp) / "mosquitto.conf"
         conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n")
+        # Through the watchdog, with stdin on a pipe: if pytest is killed, the pipe
+        # closes and the broker is stopped instead of being left behind.
         proc = subprocess.Popen(
-            [exe, "-c", str(conf)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            [sys.executable, str(WATCHDOG), exe, "-c", str(conf)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         try:
             wait_for_port("127.0.0.1", port)
@@ -372,10 +378,12 @@ def mock_node(broker):
             UPDATE_INTERVAL="0.3",
             PYTHONUNBUFFERED="1",
         )
+        # stdin on a pipe the mock watches: it exits if pytest is killed.
         proc = subprocess.Popen(
-            [sys.executable, str(MOCK_SCRIPT)],
+            [sys.executable, str(MOCK_SCRIPT), "--exit-on-stdin-eof"],
             cwd=MOCK_DIR,
             env=env,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib
+import os
+import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import paho.mqtt.client as mqtt
@@ -12,7 +15,7 @@ import pytest
 from mqtt_mcp import sparkplug
 from mqtt_mcp.sparkplug import build_payload, decode_payload
 
-from .conftest import MOCK_DIR, PROJECT
+from .conftest import MOCK_DIR, MOCK_SCRIPT, PROJECT, WATCHDOG, free_port
 
 
 @pytest.fixture(scope="module")
@@ -181,3 +184,60 @@ def test_mock_reads_config_at_runtime(mock_module):
     )
     assert (config.broker_port, config.group_id, config.update_interval) == (18999, "x", 0.5)
     assert not hasattr(mock_module, "BROKER_HOST")
+
+
+# A parent that starts COMMAND with stdin on a pipe, prints the child's pid, then
+# waits; the test kills it with SIGKILL, as a crashed or killed pytest would be.
+PARENT = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE,"
+    " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "print(child.pid, flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _orphan_after_parent_killed(command, env=None) -> int:
+    parent = subprocess.Popen(
+        [sys.executable, "-c", PARENT, *command], stdout=subprocess.PIPE, text=True, env=env
+    )
+    pid = int(parent.stdout.readline())
+    time.sleep(1.0)  # let the child start up
+    assert _alive(pid)
+    parent.kill()
+    parent.wait()
+    deadline = time.monotonic() + 15
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return pid
+
+
+def test_mock_exits_when_its_parent_is_killed():
+    env = dict(os.environ, MQTT_BROKER_PORT=str(free_port()))  # no broker: keeps retrying
+    pid = _orphan_after_parent_killed(
+        [sys.executable, str(MOCK_SCRIPT), "--exit-on-stdin-eof"], env
+    )
+    try:
+        assert not _alive(pid), "the mock outlived its killed parent"
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)
+
+
+def test_watchdog_stops_its_command_when_the_parent_is_killed():
+    pid = _orphan_after_parent_killed(
+        [sys.executable, str(WATCHDOG), sys.executable, "-c", "import time; time.sleep(600)"]
+    )
+    try:
+        assert not _alive(pid), "the watchdog outlived its killed parent"
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)

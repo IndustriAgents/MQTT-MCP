@@ -23,6 +23,7 @@ stdout.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -442,7 +443,37 @@ class MockEdgeNode:
         log("Shutdown complete")
 
 
-def main() -> None:
+def watch_stdin(node: MockEdgeNode) -> None:
+    """Stop the node when stdin reaches end-of-file (the parent process is gone)."""
+
+    def watch() -> None:
+        try:
+            # os.read, not sys.stdin: a daemon thread blocked inside the buffered
+            # reader makes the interpreter abort at exit.
+            while os.read(sys.stdin.fileno(), 4096):
+                pass
+        except (OSError, ValueError):
+            pass
+        log("stdin closed: the parent process is gone")
+        node.running = False
+
+    threading.Thread(target=watch, name="stdin-watch", daemon=True).start()
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="mqtt-mock-server",
+        description="Simulated Sparkplug B edge node (an MQTT client; it needs a broker)."
+        " Configured with MQTT_BROKER_HOST, MQTT_BROKER_PORT, SPARKPLUG_GROUP_ID,"
+        " SPARKPLUG_EDGE_NODE_ID and UPDATE_INTERVAL.",
+    )
+    parser.add_argument(
+        "--exit-on-stdin-eof",
+        action="store_true",
+        help="shut down when stdin closes; for test harnesses, so that the mock does not"
+        " outlive a parent process that was killed",
+    )
+    args = parser.parse_args(argv)
     config = MockConfig.from_env()
     log("Mock Sparkplug B edge node (an MQTT client; it needs a broker)")
     log(f"Broker: {config.broker_host}:{config.broker_port}")
@@ -458,6 +489,8 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    if args.exit_on_stdin_eof:
+        watch_stdin(node)
 
     node.connect()
     node.update_loop()
