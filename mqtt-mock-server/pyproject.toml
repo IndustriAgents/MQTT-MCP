@@ -4,14 +4,30 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mqtt-mock-server"
-version = "0.1.0"
-description = "MQTT mock server with Sparkplug B edge node simulation"
+version = "0.2.0"
+description = "Simulated Sparkplug B edge node (an MQTT client) for testing the MQTT MCP server"
 requires-python = ">=3.10"
 dependencies = [
-    "paho-mqtt>=1.6.1",
-    "protobuf>=4.24.0",
+    # Uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
+    "paho-mqtt>=2.0,<3",
+    # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode).
+    "protobuf>=4.24",
 ]
 
 [project.scripts]
 mqtt-mock-server = "mqtt_mock_server:main"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["mqtt_mock_server.py", "sparkplug_b_pb2.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

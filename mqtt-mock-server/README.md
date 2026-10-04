@@ -1,21 +1,21 @@
-# MQTT Mock Server with Sparkplug B Simulation
+# Mock Sparkplug B Edge Node
 
-Local MQTT mock for testing and development. It simulates a Sparkplug B edge node with two devices and periodic metric updates.
+A simulated Sparkplug B edge node with two devices and periodic metric updates, for testing the MQTT MCP server without real plant.
 
-The mock is an MQTT **client**, not a broker: it connects to the broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT` (default `127.0.0.1:1883`) and publishes there, so start a broker first (for example `mosquitto -v`). See the [repository README](../README.md) for the full quick start.
+The mock is an MQTT **client**, not a broker: it connects to the broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT` (default `127.0.0.1:1883`) and publishes there, so run a broker as well (see the [repository README](../README.md#1-start-an-mqtt-broker) for Homebrew, Debian/Ubuntu and Docker). If the broker is not up yet, the mock keeps retrying.
 
 ## Features
 
 - Publishes to an MQTT broker you run (no broker built in)
 - Sparkplug B edge node with:
-  - Node birth/death certificates (NBIRTH/NDEATH)
-  - Multiple simulated devices with DBIRTH/DDEATH
-  - Periodic NDATA and DDATA updates
-  - Sequence numbers: one counter for the node and its devices (NBIRTH goes out with `seq` 1 rather than 0, and no `bdSeq` metric is sent)
-  - Proper timestamps
-- Standard MQTT topics for basic testing
+  - An NDEATH Last Will carrying `bdSeq`, registered on every connect (bdSeq goes up by one per new connection)
+  - NBIRTH (`seq` 0, with `bdSeq` and `Node Control/Rebirth`) and a DBIRTH per device after every (re)connect
+  - Periodic NDATA and DDATA updates; one `seq` counter for the node and its devices
+  - Commands: NCMD `Node Control/Rebirth` republishes the births; DCMD sets device-2's `pump_speed`, `valve_position` and `enabled`
+  - Sparkplug B protobuf payloads with a `datatype` on every metric (`sparkplug_b_pb2.py`, the same file as the server's)
+- Standard MQTT topics with JSON that mirrors the simulated values
 - Configurable via environment variables
-- Graceful shutdown with proper cleanup
+- On Ctrl+C or SIGTERM, publishes DDEATH for each device and NDEATH, once, then disconnects
 
 ## Quick Start
 
@@ -29,7 +29,7 @@ uv run mqtt-mock-server
 
 ## Configuration
 
-Environment variables:
+Environment variables (read when the mock starts):
 
 - `MQTT_BROKER_HOST` - Broker address (default: `127.0.0.1`)
 - `MQTT_BROKER_PORT` - Broker port (default: `1883`)
@@ -54,85 +54,82 @@ uv run mqtt-mock-server
 
 **Node Topics:**
 - `spBv1.0/{GROUP_ID}/NBIRTH/{EDGE_NODE_ID}` - Node birth certificate
-- `spBv1.0/{GROUP_ID}/NDEATH/{EDGE_NODE_ID}` - Node death certificate
+- `spBv1.0/{GROUP_ID}/NDEATH/{EDGE_NODE_ID}` - Node death certificate (Last Will, and on shutdown)
 - `spBv1.0/{GROUP_ID}/NDATA/{EDGE_NODE_ID}` - Node data updates
-- `spBv1.0/{GROUP_ID}/NCMD/{EDGE_NODE_ID}` - Node commands (not subscribed: the mock does not act on commands)
+- `spBv1.0/{GROUP_ID}/NCMD/{EDGE_NODE_ID}` - Node commands (subscribed; `Node Control/Rebirth` is acted on)
 
 **Device Topics:**
 - `spBv1.0/{GROUP_ID}/DBIRTH/{EDGE_NODE_ID}/{DEVICE_ID}` - Device birth
 - `spBv1.0/{GROUP_ID}/DDEATH/{EDGE_NODE_ID}/{DEVICE_ID}` - Device death
 - `spBv1.0/{GROUP_ID}/DDATA/{EDGE_NODE_ID}/{DEVICE_ID}` - Device data updates
-- `spBv1.0/{GROUP_ID}/DCMD/{EDGE_NODE_ID}/{DEVICE_ID}` - Device commands (not subscribed: the mock does not act on commands)
+- `spBv1.0/{GROUP_ID}/DCMD/{EDGE_NODE_ID}/{DEVICE_ID}` - Device commands (subscribed; device-2 metrics are writable)
 
 ### Standard MQTT Topics
 
-JSON payloads with fixed values, except the uptime in `system/status`:
+JSON payloads, published every `UPDATE_INTERVAL` seconds with QoS 1:
 
-- `sensors/temperature` - Temperature reading (°C)
-- `sensors/pressure` - Pressure reading (kPa)
-- `sensors/humidity` - Humidity reading (%)
-- `control/pump` - Pump status and speed
-- `control/valve` - Valve position and status
-- `system/status` - System uptime and health
+- `sensors/temperature` - device-1's temperature (°C)
+- `sensors/pressure` - device-1's pressure (kPa)
+- `sensors/humidity` - a humidity value that varies slowly (%)
+- `control/pump` - device-2's pump: `status` ("on" when enabled and speed > 0), `speed`, `enabled`
+- `control/valve` - device-2's valve position and status
+- `system/status` - uptime and status
 
 ## Simulated Devices
 
 ### Device 1: Sensor Array
 - **Topic:** `spBv1.0/factory/D{BIRTH|DATA}/edge-node-1/device-1`
-- **Metrics:**
-  - `temperature` (float, °C) - Varies sinusoidally
-  - `pressure` (float, kPa) - Varies with cosine
-  - `flow_rate` (float, L/min) - Varies sinusoidally
+- **Metrics (read-only; DCMD writes are rejected):**
+  - `temperature` (Float, °C) - Varies sinusoidally
+  - `pressure` (Float, kPa) - Varies with cosine
+  - `flow_rate` (Float, L/min) - Varies sinusoidally
 
 ### Device 2: Control Module
-- **Topic:** `spBv1.0/factory/D{BIRTH|DATA}/edge-node-1/device-2`
-- **Metrics:**
-  - `pump_speed` (int, %) - fixed at 0
-  - `valve_position` (int, %) - fixed at 50
-  - `enabled` (bool) - fixed at off
+- **Topic:** `spBv1.0/factory/D{BIRTH|DATA|CMD}/edge-node-1/device-2`
+- **Metrics (writable with DCMD; they change only when commanded):**
+  - `pump_speed` (Int32, %) - 0 at start, settable 0-100
+  - `valve_position` (Int32, %) - 50 at start, settable 0-100
+  - `enabled` (Boolean) - false at start
+
+A DCMD with a value of the wrong datatype or out of range is rejected and logged. Accepted changes are published at once in a DDATA.
 
 ## Node Metrics
 
-- `uptime` (int, seconds) - Time since node birth
-- `status` (string) - Node status ("online", "offline", etc.)
+- `bdSeq` (Int64) - birth/death sequence of the current connection (NBIRTH only)
+- `Node Control/Rebirth` (Boolean) - always false in the NBIRTH; send true in an NCMD to request a rebirth
+- `uptime` (Int64, seconds) - Time since the mock started
+- `status` (String) - always "online" while the node is alive (its death is signalled by NDEATH)
 
 ## Testing with MCP Servers
 
 Once a broker is running on port 1883, start the mock and connect your MCP server to the same broker. Both terminals start at the repository root:
 
 ```bash
-# Terminal 1 - Start mock server
+# Terminal 1 - Start the mock edge node
 cd mqtt-mock-server
 uv run mqtt-mock-server
 
-# Terminal 2 - Start MCP server (Python)
+# Terminal 2 - Start the MCP server (Python); it waits silently for an MCP client on stdin
 cd mqtt-python
 export MQTT_BROKER_URL=mqtt://127.0.0.1:1883
+export MQTT_WRITES_ENABLED=true   # only needed for commands
 uv run mqtt-mcp
 ```
 
-Then use MCP tools to:
+Then use the MCP tools to:
 - Check the broker connection (`get_broker_info`)
-- Subscribe to topics (the server registers the subscription but does not return received messages yet)
-- Publish messages and Sparkplug B commands (the mock does not act on commands)
-
-To see what the mock publishes, watch the broker directly, for example `mosquitto_sub -h 127.0.0.1 -t '#' -v` (Sparkplug B payloads are binary).
+- Subscribe to `spBv1.0/factory/#` and see the node and its devices (`list_sparkplug_nodes`, `read_messages`)
+- Send `publish_device_command` to `edge_node_id` `edge-node-1`, `device_id` `device-2` and watch the mock apply it
 
 ## Common Test Operations
 
 ### Watch device metrics
 
-The MCP server cannot read metric values yet. Publishing to a `DDATA` topic does not read anything; it would inject a message as if it came from the device. Watch the broker instead:
+Through the MCP server: `subscribe_topic` with `spBv1.0/factory/DDATA/edge-node-1/+`, then `read_messages` (payloads come back decoded). Directly on the broker:
 
 ```bash
-mosquitto_sub -h 127.0.0.1 -t 'spBv1.0/factory/DDATA/edge-node-1/+' -v
-```
-
-### Monitor all device data
-
-Subscribe to:
-```
-spBv1.0/factory/DDATA/edge-node-1/+
+mosquitto_sub -h 127.0.0.1 -t 'spBv1.0/factory/DDATA/edge-node-1/+' -v      # binary payloads
+docker exec mqtt-broker mosquitto_sub -h 127.0.0.1 -t 'sensors/#' -v        # Docker broker
 ```
 
 ### Monitor all standard topics
@@ -146,26 +143,28 @@ system/#
 
 ## Architecture
 
-The mock server:
-1. Connects to the MQTT broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT`
-2. Publishes NBIRTH to announce the edge node
-3. Publishes DBIRTH for each device (device-1, device-2)
+The mock:
+1. Connects to the MQTT broker at `MQTT_BROKER_HOST:MQTT_BROKER_PORT` with an NDEATH Last Will (retrying until the broker answers)
+2. Subscribes to its NCMD and DCMD topics
+3. Publishes NBIRTH, then DBIRTH for each device (device-1, device-2)
 4. Every UPDATE_INTERVAL seconds:
    - Publishes NDATA with node metrics
-   - Publishes DDATA for each device with updated metrics
-   - Publishes standard MQTT topic updates
-5. On shutdown, publishes DDEATH for each device, then NDEATH for the node
+   - Publishes DDATA for each device with current metrics
+   - Publishes the standard MQTT topics
+5. Applies NCMD/DCMD as they arrive
+6. After an unexpected disconnect, reconnects with the next bdSeq and publishes its births again
+7. On shutdown, publishes DDEATH for each device, then NDEATH, and disconnects
 
 ## Limitations
 
 - This is a mock edge node that publishes data; it is not an MQTT broker and needs one to connect to
-- It subscribes to nothing, so NCMD/DCMD commands are not acted on
-- Payloads use a hand-rolled protobuf encoder whose metric field numbers do not match `sparkplug_b.proto`, so standard Sparkplug B decoders cannot read the values
-- QoS 0 (at-most-once delivery) is simplified
-- No authentication or encryption
+- No authentication or TLS; plain MQTT 3.1.1 to the configured host and port
+- Only device-2's three metrics are writable; there is no alias, property, template or dataset support
 - Designed for local testing only
 
 ## Dependencies
 
-- `paho-mqtt>=1.6.1` - MQTT client (the code uses the paho-mqtt 2.x callback API; `uv.lock` pins 2.1.0)
-- `protobuf>=4.24.0` - Protobuf runtime (Sparkplug B payloads are encoded by hand, without the official bindings)
+- `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
+- `protobuf>=4.24` - Protobuf runtime for `sparkplug_b_pb2.py`
+
+Development dependency: `ruff` (`uv sync` installs it).

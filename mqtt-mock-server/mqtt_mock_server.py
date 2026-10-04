@@ -1,417 +1,450 @@
 #!/usr/bin/env python3
-"""
-MQTT Mock Server with Sparkplug B Edge Node Simulation
+"""Simulated Sparkplug B edge node for testing the MQTT MCP server.
 
-Simulates an MQTT broker with:
-- Embedded Sparkplug B edge nodes
-- Periodic metric updates
-- Birth/death certificate handling
-- Standard MQTT topics for testing
+This is an MQTT client, not a broker: it connects to the broker at
+MQTT_BROKER_HOST:MQTT_BROKER_PORT (default 127.0.0.1:1883), keeps retrying
+until one answers, and then
+
+- registers an NDEATH Last Will carrying a bdSeq, subscribes to its NCMD/DCMD
+  topics and publishes NBIRTH (seq 0, bdSeq, Node Control/Rebirth) and a DBIRTH
+  for each device; it does this again after every reconnect (new bdSeq);
+- publishes NDATA and DDATA every UPDATE_INTERVAL seconds (device-1's sensor
+  values vary over time);
+- acts on NCMD "Node Control/Rebirth" and on DCMD writes to device-2's
+  pump_speed, valve_position and enabled, and reports changes in a DDATA;
+- publishes JSON on sensors/*, control/* and system/status that mirrors the
+  simulated values;
+- publishes DDEATH for each device and NDEATH once when stopped (SIGINT/SIGTERM).
+
+Payloads are Sparkplug B protobuf, built with sparkplug_b_pb2 (the same file
+as the MCP server's copy). The mock is not an MCP server, so it prints to
+stdout.
 """
 
-import asyncio
+from __future__ import annotations
+
 import json
 import math
 import os
 import signal
 import sys
+import threading
 import time
-from datetime import datetime
-from typing import Dict, List, Optional
+from dataclasses import dataclass
 
 import paho.mqtt.client as mqtt
-from google.protobuf import message
+
+import sparkplug_b_pb2 as pb
+
+NAMESPACE = "spBv1.0"
+BD_SEQ = "bdSeq"
+REBIRTH = "Node Control/Rebirth"
 
 
-# Configuration from environment
-BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "127.0.0.1")
-BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
-SPARKPLUG_GROUP_ID = os.getenv("SPARKPLUG_GROUP_ID", "factory")
-SPARKPLUG_EDGE_NODE_ID = os.getenv("SPARKPLUG_EDGE_NODE_ID", "edge-node-1")
-UPDATE_INTERVAL = float(os.getenv("UPDATE_INTERVAL", "2.0"))  # seconds
+@dataclass(frozen=True)
+class MockConfig:
+    broker_host: str = "127.0.0.1"
+    broker_port: int = 1883
+    group_id: str = "factory"
+    edge_node_id: str = "edge-node-1"
+    update_interval: float = 2.0
+
+    @classmethod
+    def from_env(cls, env=None) -> MockConfig:
+        env = os.environ if env is None else env
+        return cls(
+            broker_host=env.get("MQTT_BROKER_HOST") or "127.0.0.1",
+            broker_port=int(env.get("MQTT_BROKER_PORT") or 1883),
+            group_id=env.get("SPARKPLUG_GROUP_ID") or "factory",
+            edge_node_id=env.get("SPARKPLUG_EDGE_NODE_ID") or "edge-node-1",
+            update_interval=float(env.get("UPDATE_INTERVAL") or 2.0),
+        )
 
 
-class SparkplugBSimulator:
-    """Simulates a Sparkplug B edge node with devices and metrics."""
+def log(message: str) -> None:
+    print(message, flush=True)
 
-    def __init__(self, client: mqtt.Client):
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _set_value(metric, datatype: int, value) -> None:
+    metric.datatype = datatype
+    if value is None:
+        metric.is_null = True
+    elif datatype in (pb.Int8, pb.Int16, pb.Int32):
+        metric.int_value = value & 0xFFFFFFFF  # 32-bit two's complement
+    elif datatype in (pb.UInt8, pb.UInt16, pb.UInt32):
+        metric.int_value = value
+    elif datatype == pb.Int64:
+        metric.long_value = value & 0xFFFFFFFFFFFFFFFF
+    elif datatype in (pb.UInt64, pb.DateTime):
+        metric.long_value = value
+    elif datatype == pb.Float:
+        metric.float_value = value
+    elif datatype == pb.Double:
+        metric.double_value = value
+    elif datatype == pb.Boolean:
+        metric.boolean_value = value
+    else:
+        metric.string_value = str(value)
+
+
+def _signed(value: int, bits: int) -> int:
+    value &= (1 << bits) - 1
+    return value - (1 << bits) if value >= 1 << (bits - 1) else value
+
+
+def build_payload(metrics, seq: int | None):
+    """metrics: iterable of (name, datatype, value)."""
+    stamp = _now_ms()
+    payload = pb.Payload()
+    payload.timestamp = stamp
+    for name, datatype, value in metrics:
+        metric = payload.metrics.add()
+        metric.name = name
+        metric.timestamp = stamp
+        _set_value(metric, datatype, value)
+    if seq is not None:
+        payload.seq = seq
+    return payload
+
+
+class SparkplugEdgeNode:
+    """State and messages of one simulated edge node with two devices."""
+
+    WRITABLE = {
+        "device-2": {
+            "pump_speed": (pb.Int32, 0, 100),
+            "valve_position": (pb.Int32, 0, 100),
+            "enabled": (pb.Boolean, None, None),
+        }
+    }
+
+    def __init__(self, client: mqtt.Client, config: MockConfig) -> None:
         self.client = client
-        self.group_id = SPARKPLUG_GROUP_ID
-        self.edge_node_id = SPARKPLUG_EDGE_NODE_ID
-        self.sequence = 0
-        self.namespace = f"spBv1.0/{self.group_id}/EONB/{self.edge_node_id}"
-        self.start_time = time.time()  # Track when node started
+        self.group_id = config.group_id
+        self.edge_node_id = config.edge_node_id
+        self.lock = threading.RLock()
+        self.seq = 0
+        self.bd_seq = 0
+        self.node_online = False
+        self.start_time = time.time()
         self.devices = {
             "device-1": {
                 "name": "Sensor Array 1",
                 "metrics": {
-                    "temperature": {"value": 22.5, "type": "float", "unit": "°C"},
-                    "pressure": {"value": 101.3, "type": "float", "unit": "kPa"},
-                    "flow_rate": {"value": 45.2, "type": "float", "unit": "L/min"},
+                    "temperature": {"value": 22.5, "type": pb.Float, "unit": "°C"},
+                    "pressure": {"value": 101.3, "type": pb.Float, "unit": "kPa"},
+                    "flow_rate": {"value": 45.2, "type": pb.Float, "unit": "L/min"},
                 },
             },
             "device-2": {
                 "name": "Control Module 1",
                 "metrics": {
-                    "pump_speed": {"value": 0, "type": "int", "unit": "%"},
-                    "valve_position": {"value": 50, "type": "int", "unit": "%"},
-                    "enabled": {"value": False, "type": "bool", "unit": ""},
+                    "pump_speed": {"value": 0, "type": pb.Int32, "unit": "%"},
+                    "valve_position": {"value": 50, "type": pb.Int32, "unit": "%"},
+                    "enabled": {"value": False, "type": pb.Boolean, "unit": ""},
                 },
             },
         }
-        self.metrics = {
-            "uptime": {"value": 0, "type": "int", "unit": "s"},
-            "status": {"value": "online", "type": "string", "unit": ""},
-        }
-        self.node_online = False
-        self.timestamp = int(time.time() * 1000)
 
-    def _next_sequence(self) -> int:
-        """Get next sequence number (0-255)."""
-        self.sequence = (self.sequence + 1) % 256
-        return self.sequence
+    # -- topics and payloads ------------------------------------------------
 
-    def _encode_varint(self, value: int) -> bytes:
-        """Encode a varint."""
-        buf = bytearray()
-        while (value & 0xffffff80) != 0:
-            buf.append((value & 0xff) | 0x80)
-            value >>= 7
-        buf.append(value & 0xff)
-        return bytes(buf)
+    def topic(self, message_type: str, device_id: str | None = None) -> str:
+        parts = [NAMESPACE, self.group_id, message_type, self.edge_node_id]
+        if device_id is not None:
+            parts.append(device_id)
+        return "/".join(parts)
 
-    def _encode_metric_protobuf(self, name: str, value: any, metric_type: str) -> bytes:
-        """Encode a single metric to protobuf."""
-        parts = []
-        # Field 1: name (string, wire type 2)
-        name_bytes = name.encode("utf-8")
-        parts.append(bytes([0x0a]))
-        parts.append(self._encode_varint(len(name_bytes)))
-        parts.append(name_bytes)
-        
-        # Field 2: timestamp (varint, wire type 0)
-        parts.append(bytes([0x10]))
-        parts.append(self._encode_varint(int(time.time() * 1000)))
-        
-        # Add value based on type
-        metric_type = str(metric_type).lower()
-        if metric_type in ("int", "int32"):
-            # Field 5: int_value
-            parts.append(bytes([0x28]))
-            parts.append(self._encode_varint(int(value)))
-        elif metric_type == "float":
-            # Field 9: float_value (fixed32, wire type 5)
-            parts.append(bytes([0x4d]))
-            import struct
-            parts.append(struct.pack("<f", float(value)))
-        elif metric_type == "bool":
-            # Field 11: boolean_value
-            parts.append(bytes([0x58]))
-            parts.append(bytes([1 if value else 0]))
-        else:  # string
-            # Field 12: string_value
-            val_bytes = str(value).encode("utf-8")
-            parts.append(bytes([0x62]))
-            parts.append(self._encode_varint(len(val_bytes)))
-            parts.append(val_bytes)
-        
-        return b"".join(parts)
+    def death_payload(self) -> bytes:
+        """NDEATH: only the bdSeq metric, no seq (Sparkplug B 3.0)."""
+        return build_payload([(BD_SEQ, pb.Int64, self.bd_seq)], seq=None).SerializeToString()
 
-    def _encode_payload_protobuf(self, metrics: List[tuple]) -> bytes:
-        """Encode a Sparkplug B payload."""
-        parts = []
-        
-        # Field 1: timestamp (varint)
-        parts.append(bytes([0x08]))
-        parts.append(self._encode_varint(int(time.time() * 1000)))
-        
-        # Field 2: metrics (repeated message)
-        for name, value, dtype in metrics:
-            metric_bytes = self._encode_metric_protobuf(name, value, dtype)
-            parts.append(bytes([0x12]))
-            parts.append(self._encode_varint(len(metric_bytes)))
-            parts.append(metric_bytes)
-        
-        # Field 3: seq (varint)
-        parts.append(bytes([0x18]))
-        parts.append(self._encode_varint(self.sequence))
-        
-        return b"".join(parts)
+    def uptime(self) -> int:
+        return int(time.time() - self.start_time)
 
-    def _add_metric(
-        self,
-        metrics_list: List[tuple],
-        name: str,
-        value: any,
-        metric_type: str,
-    ) -> None:
-        """Add a metric to the metrics list."""
-        metrics_list.append((name, value, metric_type))
+    def _next_seq(self) -> int:
+        self.seq = (self.seq + 1) % 256
+        return self.seq
 
-    def publish_node_birth(self) -> bool:
-        """Publish NBIRTH (Node Birth) certificate."""
-        self._next_sequence()
-        metrics = []
-        self._add_metric(metrics, "uptime", 0, "int")
-        self._add_metric(metrics, "status", "online", "string")
+    def _publish(self, topic: str, payload, qos: int = 0) -> bool:
+        data = payload if isinstance(payload, bytes) else payload.SerializeToString()
+        result = self.client.publish(topic, data, qos=qos, retain=False)
+        return result.rc == mqtt.MQTT_ERR_SUCCESS
 
-        # Publish NBIRTH
-        topic = f"spBv1.0/{self.group_id}/NBIRTH/{self.edge_node_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=1, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            self.node_online = True
-            return True
-        return False
+    def _device_metrics(self, device_id: str, names=None):
+        metrics = self.devices[device_id]["metrics"]
+        return [
+            (name, info["type"], info["value"])
+            for name, info in metrics.items()
+            if names is None or name in names
+        ]
 
-    def publish_node_death(self) -> bool:
-        """Publish NDEATH (Node Death) certificate."""
-        self._next_sequence()
-        metrics = []
+    # -- lifecycle messages ---------------------------------------------------
 
-        topic = f"spBv1.0/{self.group_id}/NDEATH/{self.edge_node_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=1, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+    def publish_births(self) -> bool:
+        """NBIRTH (seq 0) followed by a DBIRTH for every device."""
+        with self.lock:
+            self.seq = 0
+            metrics = [
+                (BD_SEQ, pb.Int64, self.bd_seq),
+                (REBIRTH, pb.Boolean, False),
+                ("uptime", pb.Int64, self.uptime()),
+                ("status", pb.String, "online"),
+            ]
+            ok = self._publish(self.topic("NBIRTH"), build_payload(metrics, seq=0))
+            self.node_online = ok
+            for device_id in self.devices:
+                seq = self._next_seq()
+                payload = build_payload(self._device_metrics(device_id), seq=seq)
+                ok = self._publish(self.topic("DBIRTH", device_id), payload) and ok
+            return ok
+
+    def publish_deaths(self) -> None:
+        """DDEATH for every device, then NDEATH; waits for the NDEATH PUBACK."""
+        with self.lock:
+            if not self.node_online:
+                return
+            for device_id in self.devices:
+                payload = build_payload([], seq=self._next_seq())
+                self._publish(self.topic("DDEATH", device_id), payload)
+            info = self.client.publish(self.topic("NDEATH"), self.death_payload(), qos=1)
             self.node_online = False
-            return True
-        return False
+        if info.rc == mqtt.MQTT_ERR_SUCCESS:
+            try:
+                info.wait_for_publish(2.0)
+            except (RuntimeError, ValueError):
+                pass
 
-    def publish_device_birth(self, device_id: str) -> bool:
-        """Publish DBIRTH (Device Birth) certificate."""
+    # -- periodic data ----------------------------------------------------------
+
+    def simulate(self) -> None:
+        now = time.time()
+        sensors = self.devices["device-1"]["metrics"]
+        sensors["temperature"]["value"] = 22.5 + 2.0 * math.sin(now / 10.0)
+        sensors["pressure"]["value"] = 101.3 + 1.0 * math.cos(now / 15.0)
+        sensors["flow_rate"]["value"] = 45.2 + 5.0 * math.sin(now / 8.0)
+
+    def publish_data(self) -> bool:
+        with self.lock:
+            if not self.node_online:
+                return False
+            self.simulate()
+            node = [("uptime", pb.Int64, self.uptime()), ("status", pb.String, "online")]
+            ok = self._publish(self.topic("NDATA"), build_payload(node, seq=self._next_seq()))
+            for device_id in self.devices:
+                payload = build_payload(self._device_metrics(device_id), seq=self._next_seq())
+                ok = self._publish(self.topic("DDATA", device_id), payload) and ok
+            return ok
+
+    def standard_topics(self) -> dict[str, dict]:
+        sensors = self.devices["device-1"]["metrics"]
+        control = self.devices["device-2"]["metrics"]
+        pump_on = control["enabled"]["value"] and control["pump_speed"]["value"] > 0
+        return {
+            "sensors/temperature": {
+                "value": round(sensors["temperature"]["value"], 2),
+                "unit": "°C",
+            },
+            "sensors/pressure": {"value": round(sensors["pressure"]["value"], 2), "unit": "kPa"},
+            "sensors/humidity": {
+                "value": round(55.0 + 5.0 * math.sin(time.time() / 20.0), 1),
+                "unit": "%",
+            },
+            "control/pump": {
+                "status": "on" if pump_on else "off",
+                "speed": control["pump_speed"]["value"],
+                "enabled": control["enabled"]["value"],
+            },
+            "control/valve": {"position": control["valve_position"]["value"], "status": "stable"},
+            "system/status": {"uptime": self.uptime(), "status": "online"},
+        }
+
+    # -- commands ---------------------------------------------------------------
+
+    def handle_command(self, topic: str, data: bytes) -> list[str]:
+        """Apply an NCMD/DCMD addressed to this node; return what was done."""
+        parts = topic.split("/")
+        try:
+            payload = pb.Payload.FromString(data)
+        except Exception as exc:
+            return [f"ignored {topic}: not a Sparkplug B payload ({exc})"]
+        if parts[2] == "NCMD":
+            return self._node_command(payload)
+        return self._device_command(parts[4] if len(parts) > 4 else "", payload)
+
+    def _node_command(self, payload) -> list[str]:
+        done = []
+        for metric in payload.metrics:
+            if metric.name == REBIRTH and metric.WhichOneof("value") == "boolean_value":
+                if metric.boolean_value:
+                    self.publish_births()
+                    done.append("rebirth: republished NBIRTH and DBIRTH")
+            else:
+                done.append(f"ignored NCMD metric {metric.name!r}")
+        return done
+
+    def _device_command(self, device_id: str, payload) -> list[str]:
+        writable = self.WRITABLE.get(device_id)
         if device_id not in self.devices:
-            return False
-
-        device = self.devices[device_id]
-        self._next_sequence()
-        metrics = []
-
-        # Add device metrics with definitions
-        for metric_name, metric_info in device["metrics"].items():
-            self._add_metric(
-                metrics, metric_name, metric_info["value"], metric_info["type"]
-            )
-
-        topic = f"spBv1.0/{self.group_id}/DBIRTH/{self.edge_node_id}/{device_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=1, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            return True
-        return False
-
-    def publish_device_death(self, device_id: str) -> bool:
-        """Publish DDEATH (Device Death) certificate."""
-        if device_id not in self.devices:
-            return False
-
-        self._next_sequence()
-        metrics = []
-
-        topic = f"spBv1.0/{self.group_id}/DDEATH/{self.edge_node_id}/{device_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=1, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            return True
-        return False
-
-    def publish_node_data(self) -> bool:
-        """Publish NDATA (Node Data) with updated metrics."""
-        if not self.node_online:
-            return False
-
-        self._next_sequence()
-        metrics = []
-
-        # Update and publish node metrics
-        uptime = int((time.time() - self.start_time))
-        self._add_metric(metrics, "uptime", uptime, "int")
-        self._add_metric(metrics, "status", "online", "string")
-
-        topic = f"spBv1.0/{self.group_id}/NDATA/{self.edge_node_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=0, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            return True
-        return False
-
-    def publish_device_data(self, device_id: str) -> bool:
-        """Publish DDATA (Device Data) with updated metrics."""
-        if device_id not in self.devices or not self.node_online:
-            return False
-
-        device = self.devices[device_id]
-        self._next_sequence()
-        metrics = []
-
-        # Simulate metric changes
-        if device_id == "device-1":
-            # Sensor data with slight variations
-            device["metrics"]["temperature"]["value"] = (
-                22.5 + 2.0 * math.sin(time.time() / 10.0)
-            )
-            device["metrics"]["pressure"]["value"] = (
-                101.3 + 1.0 * math.cos(time.time() / 15.0)
-            )
-            device["metrics"]["flow_rate"]["value"] = (
-                45.2 + 5.0 * math.sin(time.time() / 8.0)
-            )
-
-        # Add metrics to payload
-        for metric_name, metric_info in device["metrics"].items():
-            self._add_metric(
-                metrics, metric_name, metric_info["value"], metric_info["type"]
-            )
-
-        topic = f"spBv1.0/{self.group_id}/DDATA/{self.edge_node_id}/{device_id}"
-        payload = self._encode_payload_protobuf(metrics)
-        result = self.client.publish(topic, payload, qos=0, retain=False)
-        if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            return True
-        return False
+            return [f"ignored DCMD for unknown device {device_id!r}"]
+        if writable is None:
+            return [f"ignored DCMD for {device_id}: its metrics are read-only"]
+        done, changed = [], []
+        with self.lock:
+            for metric in payload.metrics:
+                spec = writable.get(metric.name)
+                if spec is None:
+                    done.append(f"ignored {device_id}/{metric.name}: not writable")
+                    continue
+                datatype, low, high = spec
+                field = metric.WhichOneof("value")
+                if datatype == pb.Boolean and field == "boolean_value":
+                    value = metric.boolean_value
+                elif datatype == pb.Int32 and field in ("int_value", "long_value"):
+                    raw = getattr(metric, field)
+                    value = _signed(raw, 32 if field == "int_value" else 64)
+                    if not low <= value <= high:
+                        done.append(
+                            f"rejected {device_id}/{metric.name}={value}: outside {low}..{high}"
+                        )
+                        continue
+                else:
+                    done.append(
+                        f"rejected {device_id}/{metric.name}: expected"
+                        f" {pb.DataType.Name(datatype)}, got {field}"
+                    )
+                    continue
+                self.devices[device_id]["metrics"][metric.name]["value"] = value
+                changed.append(metric.name)
+                done.append(f"set {device_id}/{metric.name}={value}")
+            if changed and self.node_online:
+                payload = build_payload(self._device_metrics(device_id, changed), self._next_seq())
+                self._publish(self.topic("DDATA", device_id), payload)
+        return done
 
 
-class MockMQTTServer:
-    """Mock MQTT Server with Sparkplug B simulation."""
+class MockEdgeNode:
+    """The MQTT client side: connection, callbacks, update loop and shutdown."""
 
-    def __init__(self):
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+    def __init__(self, config: MockConfig) -> None:
+        self.config = config
+        self.client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=f"mqtt-mock-{config.edge_node_id}-{os.getpid()}",
+        )
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.client.on_disconnect = self.on_disconnect
-        # Enable automatic reconnection with exponential backoff
-        self.client.reconnect_delay_set(min_delay=1, max_delay=32)
-        self.sparkplug = SparkplugBSimulator(self.client)
+        self.client.reconnect_delay_set(min_delay=1, max_delay=10)
+        self.sparkplug = SparkplugEdgeNode(self.client, config)
+        self.client.will_set(
+            self.sparkplug.topic("NDEATH"), self.sparkplug.death_payload(), qos=1, retain=False
+        )
         self.running = True
-        self.last_update = 0
         self.connected = False
+        self.last_update = 0.0
+        self._shutdown_lock = threading.Lock()
+        self._shut_down = False
 
-    def on_connect(self, client, userdata, flags, rc):
-        """Called when the client connects to the broker."""
-        if rc == 0:
-            self.connected = True
-            print(f"Connected to broker")
-            self.sparkplug.start_time = time.time()
-        else:
+    def on_connect(self, client, userdata, flags, reason_code, properties) -> None:
+        if reason_code.is_failure:
             self.connected = False
-            print(f"Connection failed with code {rc}")
+            log(f"Connection refused by the broker: {reason_code}")
+            return
+        self.connected = True
+        log(f"Connected to broker (bdSeq {self.sparkplug.bd_seq})")
+        client.subscribe(self.sparkplug.topic("NCMD"), qos=0)
+        client.subscribe(self.sparkplug.topic("DCMD", "+"), qos=0)
+        self.sparkplug.publish_births()
 
-    def on_message(self, client, userdata, msg):
-        """Called when a message is received."""
-        pass  # Silently handle messages
+    def on_message(self, client, userdata, msg) -> None:
+        try:
+            for line in self.sparkplug.handle_command(msg.topic, msg.payload):
+                log(f"Command: {line}")
+        except Exception as exc:  # never kill the network thread
+            log(f"Command on {msg.topic} failed: {exc}")
 
-    def on_disconnect(self, client, userdata, rc):
-        """Called when the client disconnects."""
+    def on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
         self.connected = False
-        if rc != 0:
-            print(f"Unexpected disconnection: {rc} (will auto-reconnect)")
-        # Don't print on normal disconnect - let auto-reconnect handle it
+        self.sparkplug.node_online = False
+        if self.running:
+            # The broker publishes the NDEATH will; the next session needs a new bdSeq.
+            self.sparkplug.bd_seq = (self.sparkplug.bd_seq + 1) % 256
+            client.will_set(
+                self.sparkplug.topic("NDEATH"), self.sparkplug.death_payload(), qos=1, retain=False
+            )
+            log(f"Disconnected ({reason_code}); reconnecting")
 
-    def connect(self):
-        """Connect to MQTT broker."""
+    def connect(self) -> None:
+        """Start connecting; paho keeps retrying until the broker answers."""
+        log(f"Connecting to MQTT broker at {self.config.broker_host}:{self.config.broker_port}...")
+        self.client.connect_async(self.config.broker_host, self.config.broker_port, keepalive=60)
+        self.client.loop_start()
+
+    def publish_standard_topics(self) -> None:
+        for topic, data in self.sparkplug.standard_topics().items():
+            self.client.publish(topic, json.dumps(data), qos=1)
+
+    def update_loop(self) -> None:
+        iteration = 0
         try:
-            print(f"Connecting to MQTT broker at {BROKER_HOST}:{BROKER_PORT}...")
-            self.client.connect(BROKER_HOST, BROKER_PORT, keepalive=60)
-            self.client.loop_start()
-            time.sleep(0.5)  # Give connection time to establish
-            return True
-        except Exception as e:
-            print(f"Failed to connect: {e}")
-            return False
-
-    def publish_standard_topics(self):
-        """Publish to standard MQTT topics for testing."""
-        topics = {
-            "sensors/temperature": {"value": 22.5, "unit": "°C"},
-            "sensors/pressure": {"value": 101.3, "unit": "kPa"},
-            "sensors/humidity": {"value": 55, "unit": "%"},
-            "control/pump": {"status": "off", "speed": 0},
-            "control/valve": {"position": 50, "status": "stable"},
-            "system/status": {"uptime": int(time.time() - self.sparkplug.start_time)},
-        }
-
-        for topic, data in topics.items():
-            payload = json.dumps(data)
-            self.client.publish(topic, payload, qos=1)
-
-    def update_loop(self):
-        """Main update loop."""
-        try:
-            # Publish NBIRTH on startup
-            self.sparkplug.publish_node_birth()
-            time.sleep(1)
-
-            # Publish device births
-            for device_id in self.sparkplug.devices:
-                self.sparkplug.publish_device_birth(device_id)
-                time.sleep(0.5)
-
-            # Main loop
-            iteration = 0
             while self.running:
-                current_time = time.time()
-
-                # Publish standard topics every 2 seconds
-                if current_time - self.last_update >= UPDATE_INTERVAL:
+                now = time.time()
+                if (
+                    self.connected
+                    and self.sparkplug.node_online
+                    and now - self.last_update >= self.config.update_interval
+                ):
+                    self.sparkplug.publish_data()
                     self.publish_standard_topics()
-                    self.sparkplug.publish_node_data()
-
-                    # Publish device data
-                    for device_id in self.sparkplug.devices:
-                        self.sparkplug.publish_device_data(device_id)
-
-                    self.last_update = current_time
+                    self.last_update = now
                     iteration += 1
-                    print(f"Update cycle {iteration}")
-
+                    log(f"Update cycle {iteration}")
                 time.sleep(0.1)
-
         except KeyboardInterrupt:
-            print("\nShutdown requested...")
+            log("Shutdown requested...")
         finally:
             self.shutdown()
 
-    def shutdown(self):
-        """Gracefully shutdown the server."""
-        print("Shutting down...")
+    def shutdown(self) -> None:
+        """Publish DDEATH/NDEATH and disconnect. Runs once, however often it is called."""
+        with self._shutdown_lock:
+            if self._shut_down:
+                return
+            self._shut_down = True
+        log("Shutting down...")
         self.running = False
-
-        # Publish device deaths
-        for device_id in self.sparkplug.devices:
-            self.sparkplug.publish_device_death(device_id)
-            time.sleep(0.5)
-
-        # Publish node death
-        self.sparkplug.publish_node_death()
-
-        self.client.loop_stop()
+        if self.connected:
+            self.sparkplug.publish_deaths()
         self.client.disconnect()
-        time.sleep(1)
-        print("Shutdown complete")
+        self.client.loop_stop()
+        log("Shutdown complete")
 
 
-def main():
-    """Main entry point."""
-    print(f"MQTT Mock Server - Sparkplug B Simulation")
-    print(f"Broker: {BROKER_HOST}:{BROKER_PORT}")
-    print(f"Sparkplug Group: {SPARKPLUG_GROUP_ID}")
-    print(f"Edge Node: {SPARKPLUG_EDGE_NODE_ID}")
-    print()
+def main() -> None:
+    config = MockConfig.from_env()
+    log("Mock Sparkplug B edge node (an MQTT client; it needs a broker)")
+    log(f"Broker: {config.broker_host}:{config.broker_port}")
+    log(f"Sparkplug Group: {config.group_id}")
+    log(f"Edge Node: {config.edge_node_id}")
+    log("")
 
-    server = MockMQTTServer()
+    node = MockEdgeNode(config)
 
-    def signal_handler(sig, frame):
-        server.shutdown()
-        sys.exit(0)
+    def request_stop(signum, frame) -> None:
+        # Only ask the loop to stop; update_loop's finally runs shutdown() once.
+        node.running = False
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
 
-    if server.connect():
-        server.update_loop()
-    else:
-        sys.exit(1)
+    node.connect()
+    node.update_loop()
+    sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
-
