@@ -162,6 +162,8 @@ class Proxy:
         self.hold_downstream = False
         #: While true, nothing is read from the client: its sends back up.
         self.pause_upstream = False
+        #: While true, bytes from the broker are held back (delivered on release).
+        self.pause_downstream = False
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._thread.start()
@@ -228,6 +230,8 @@ class Proxy:
                         first = False
                     if not upstream and self.hold_downstream:
                         continue
+                    while not upstream and self.pause_downstream:
+                        await asyncio.sleep(0.0005)
                     dst.write(data)
                     await dst.drain()
             except (OSError, asyncio.IncompleteReadError, ssl.SSLError):

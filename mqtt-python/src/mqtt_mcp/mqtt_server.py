@@ -788,7 +788,9 @@ class MQTTClientManager:
             payload = sparkplug.build_payload(
                 [], seq=None, extra_metrics=[sparkplug.bd_seq_metric(bd_seq)]
             ).SerializeToString()
-        await asyncio.to_thread(self._stop_network, True, self.settings.tool_timeout)
+        # Bounded by what is left of the call's deadline (at least 1 s, so that the
+        # network thread is stopped cleanly even when the call has run out).
+        await asyncio.to_thread(self._stop_network, True, max(self.time_left(), 1.0))
         with self._lock:
             if self.closing:  # checked under the lock, right before reconnecting
                 raise PublishError("the server is shutting down; the session was not restarted")
@@ -884,7 +886,8 @@ def call_deadline(settings: Settings) -> float:
 
     It is one absolute deadline per call, shared by every step (waiting for the
     connection or a lock, a session restart, the broker's acknowledgement), so
-    no call can hang without an outcome and none is sent after its deadline.
+    no call can hang without an outcome. Once it has passed, nothing more is
+    handed to the MQTT client for the call, and what is still queued is withdrawn.
     """
     return settings.tool_timeout
 
@@ -935,7 +938,7 @@ class EnvelopeFastMCP(FastMCP):
     - Every call has one absolute deadline (``call_deadline``). A write that
       runs out of time reports what it knows: "not_sent" if nothing was handed to
       the MQTT client (or it was withdrawn in time), else "unknown". A read gets
-      a clean error. Nothing is sent after the deadline.
+      a clean error. Nothing is handed to the MQTT client after the deadline.
     - When the MCP client disconnects (stdin closes), every running call is
       cancelled at once and nothing more is published; see run_stdio_async.
     """
@@ -1684,7 +1687,7 @@ async def _publish_command(
     edge_node_id: str,
     device_id: str | None = None,
 ) -> dict[str, Any]:
-    target_group = _check_id(group_id or m.settings.group_id, "group_id")
+    target_group = _check_id(m.settings.group_id if group_id is None else group_id, "group_id")
     target_node = _check_id(edge_node_id, "edge_node_id")
     metrics = _check_metrics(metrics, required=True)
     payload = sparkplug.build_payload(metrics, seq=None)  # commands carry no seq

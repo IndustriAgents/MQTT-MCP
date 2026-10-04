@@ -716,3 +716,89 @@ async def test_a_call_that_finishes_after_its_cancel_does_not_reply_twice(monkey
     assert any(
         "cancelled by the MCP client but finished: written" in r.message for r in caplog.records
     )
+
+
+async def test_a_connection_that_arrives_after_the_deadline_sends_nothing(monkeypatch):
+    """The wait for the connection ends just after the call's deadline, connected:
+    the message must not be handed to paho any more (not_sent)."""
+    handed = []
+
+    async def connected_too_late(self):
+        while self.time_left() > 0:
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.02)  # the CONNACK came 20 ms after the deadline
+
+    def spy(self, topic, payload=None, qos=0, retain=False, properties=None):
+        handed.append(topic)
+        info = mqtt.MQTTMessageInfo(1)
+        info.rc = mqtt.MQTT_ERR_SUCCESS
+        return info
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected_too_late)
+    monkeypatch.setattr(mqtt_server._Client, "publish", spy)
+    async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.3") as session:
+        for qos in (0, 1):
+            result = await call(session, "publish_message", topic="a/b", payload="x", qos=qos)
+            assert result["meta"] == {"outcome": "not_sent", "request_sent": False, "topic": "a/b"}
+            assert "deadline" in result["error"]
+    assert handed == []
+
+
+async def test_closing_stdin_marks_the_manager_closing(monkeypatch):
+    """The wiring from the stdio relay's end of file to the MQTT manager."""
+    closed = []
+    original = mqtt_server.MQTTClientManager.close_for_disconnect
+
+    def record(self):
+        closed.append(self)
+        original(self)
+
+    monkeypatch.setattr(mqtt_server.MQTTClientManager, "close_for_disconnect", record)
+    try:
+        async with server() as session:
+            await call(session, "get_broker_info")
+            mqtt_server.mcp.client_disconnected()  # what the relay calls at end of file
+            assert len(closed) == 1 and closed[0].closing is True
+    finally:
+        mqtt_server.mcp.client_gone = False
+
+
+async def test_a_seq_that_may_have_gone_out_is_never_reused():
+    """_publish_edge cancelled after the hand-over: the seq counts as used."""
+    manager = _offline_manager()
+    manager.will_active = manager.node_born = True
+    manager.seq = 5
+    state = mqtt_server.SendState()
+    token = mqtt_server._send_state.set(state)
+
+    async def cancelled_after(outcome):
+        async def publish(*args, **kwargs):
+            state.sent, state.outcome = True, outcome
+            raise asyncio.CancelledError
+
+        manager.publish = publish
+        with pytest.raises(asyncio.CancelledError):
+            await mqtt_server._publish_edge(manager, "NDATA", METRIC)
+
+    try:
+        await cancelled_after("unknown")  # may have gone out with seq 6
+        assert manager.seq == 6
+        await cancelled_after("not_sent")  # withdrawn: seq 7 was never used
+        assert manager.seq == 6
+    finally:
+        mqtt_server._send_state.reset(token)
+
+
+async def test_commands_refuse_an_empty_target():
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        for arguments in (
+            {"edge_node_id": "", "metrics": METRIC},
+            {"edge_node_id": "n", "group_id": "", "metrics": METRIC},
+        ):
+            result = await call(session, "publish_node_command", **arguments)
+            assert result["success"] is False and "non-empty" in result["error"], arguments
+            assert result["meta"]["outcome"] == "not_sent"
+        device = await call(
+            session, "publish_device_command", edge_node_id="", device_id="d", metrics=METRIC
+        )
+        assert device["success"] is False and "edge_node_id" in device["error"]

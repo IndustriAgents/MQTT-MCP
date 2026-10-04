@@ -37,9 +37,11 @@ supports:
   `DYLD_*`, ...) are ignored with a warning on stderr.
 - **No call hangs.** Every tool call has one deadline, `MQTT_TOOL_TIMEOUT`
   (default 10 s, at most 50 s), counted from its start and shared by every
-  step (connection, session restart, acknowledgement). A write whose deadline
-  passes before it is on the socket is withdrawn and reported as `not_sent`,
-  one that may have left as `unknown`; a read returns a clean error.
+  step (connection, session restart, acknowledgement). After the deadline
+  nothing more is handed to the MQTT client for that call, even if the
+  connection comes up a moment later; a write still in the client's queue is
+  withdrawn and reported as `not_sent`, one the client had started writing as
+  `unknown`; a read returns a clean error.
 - **At most once.** The server never sends a publish or command a second time.
   When a confirmation is late or lost it withdraws the message from the MQTT
   client's queue and reports `success: false` with `meta.outcome: "unknown"`

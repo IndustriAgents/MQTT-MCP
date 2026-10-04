@@ -325,3 +325,41 @@ async def test_a_cancel_racing_the_hand_over_never_reaches_the_broker(
     finally:
         mqtt_server.set_settings(None)
     assert observer.find(lambda m: m.topic.startswith(topic)) == []
+
+
+async def test_calls_whose_connection_arrives_after_their_deadline_send_nothing(
+    broker, observer, proxy_factory, raw_server
+):
+    """20 concurrent writes wait for the connection; the broker's CONNACK is held
+    back until just after their deadline. None may be handed over late."""
+    deadline = 2.0
+    for trial in range(2):
+        tag = unique(f"boundary{trial}")
+        observer.subscribe(f"itest-once/{tag}/#")
+        proxy = proxy_factory().start()
+        proxy.pause_downstream = True  # the CONNECT gets through, the CONNACK waits
+        srv = raw_server(
+            MQTT_BROKER_URL=f"mqtt://127.0.0.1:{proxy.port}",
+            MQTT_WRITES_ENABLED="true",
+            MQTT_TOOL_TIMEOUT=str(deadline),
+        )
+        started = time.monotonic()
+        calls = [
+            srv.call_async(
+                "publish_message", topic=f"itest-once/{tag}/late{i}", payload="late", qos=i % 2
+            )
+            for i in range(20)
+        ]
+        while time.monotonic() < started + deadline + 0.02:
+            await asyncio.sleep(0.0005)
+        proxy.pause_downstream = False  # connected, 20 ms after the deadline
+        outcomes = []
+        for request_id in calls:
+            response = await asyncio.to_thread(srv.wait, request_id, 10)
+            outcomes.append(response["result"]["structuredContent"]["meta"]["outcome"])
+        await asyncio.sleep(1.0)
+        arrived = [m.topic for m in observer.find(lambda m: m.topic.startswith("itest-once/"))]
+        assert [t for t in arrived if tag in t] == [], f"trial {trial}"
+        assert set(outcomes) == {"not_sent"}, outcomes
+        srv.close_stdin()
+        await asyncio.to_thread(srv.wait_exit, 30)
