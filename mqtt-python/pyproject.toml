@@ -8,9 +8,12 @@ version = "0.2.0"
 description = "MQTT + Sparkplug B MCP server"
 requires-python = ">=3.10"
 dependencies = [
-    # Imported directly (task groups, cancel scopes); 4.5 is mcp 1.12's own floor.
-    "anyio>=4.5",
-    "mcp[cli]>=1.12,<2",
+    # Imported directly (task groups, cancel scopes). 4.7 is the lowest version the
+    # rest of the dependency tree allows (sse-starlette), so the one actually tested.
+    "anyio>=4.7",
+    # FastMCP internals are used, hence <2. mcp 1.12.0-1.12.2 break the session when a
+    # client cancels two running calls (found by the lowest-direct job).
+    "mcp[cli]>=1.12.3,<2",
     # The client uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
     "paho-mqtt>=2.0,<3",
     # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode); 5.27 is the

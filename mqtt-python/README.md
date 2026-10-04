@@ -165,8 +165,8 @@ Add `"MQTT_WRITES_ENABLED": "true"` to `env` only if the agent may publish.
 
 ## Dependencies
 
-- `mcp[cli]>=1.12,<2` - MCP framework with FastMCP (mcp 2.x removed `mcp.server.fastmcp`, and the server uses FastMCP internals, so it needs 1.x)
-- `anyio>=4.5` - task groups and cancel scopes (stdio relay, call cancellation)
+- `mcp[cli]>=1.12.3,<2` - MCP framework with FastMCP (1.12.0-1.12.2 break the session when a client cancels two running calls; mcp 2.x removed `mcp.server.fastmcp`, and the server uses FastMCP internals, so it needs 1.x)
+- `anyio>=4.7` - task groups and cancel scopes (stdio relay, call cancellation)
 - `pydantic>=2.8,<3` (`>=2.12` on Python 3.14) - strict argument types
 - `paho-mqtt>=2.0,<3` - MQTT client (2.x callback API)
 - `protobuf>=5.27` - Protobuf runtime for the Sparkplug B schema
