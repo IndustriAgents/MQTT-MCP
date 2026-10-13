@@ -36,8 +36,10 @@ paste the tool output or the error
 - OS:
 - Python version:
 - Commit SHA:
-- Relevant settings (`MQTT_BROKER_URL`, `SPARKPLUG_GROUP_ID`,
-  `SPARKPLUG_EDGE_NODE_ID`). Do not paste passwords:
+- Relevant settings (`MQTT_BROKER_URL`, `MQTT_WRITES_ENABLED`,
+  `SPARKPLUG_GROUP_ID`, `SPARKPLUG_EDGE_NODE_ID`, which `MQTT_TLS_*` are set).
+  Do not paste passwords or keys:
+- Output of `get_broker_info`, if the server starts:
 
 **Additional context**
 Topics, payloads (hex for Sparkplug B), broker logs and stderr from the server:

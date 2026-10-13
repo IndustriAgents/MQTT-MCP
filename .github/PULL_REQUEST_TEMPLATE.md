@@ -19,11 +19,13 @@
 
 - [ ] No
 - [ ] Yes. Describe the new capability (topics, Sparkplug `NCMD`/`DCMD`,
-      retained messages) and how it is gated:
+      retained messages). Every publishing tool must refuse while
+      `MQTT_WRITES_ENABLED` is off (the default):
 
 ## Checklist
 
-- [ ] The CI checks pass locally (see [CONTRIBUTING.md](https://github.com/IndustriAgents/MQTT-MCP/blob/main/CONTRIBUTING.md#checks-ci-runs)).
+- [ ] The CI checks pass locally, including `ruff` and `pytest` with a broker (see [CONTRIBUTING.md](https://github.com/IndustriAgents/MQTT-MCP/blob/main/CONTRIBUTING.md#checks-ci-runs)).
+- [ ] New or changed behaviour has tests, and tools still return the `{ success, data, error, meta }` envelope.
 - [ ] The mock edge node can exercise the change, and I tested against it with a local broker.
 - [ ] Nothing was tested against a production broker or equipment.
 - [ ] `stdout` is still clean: the server logs only to `stderr`.

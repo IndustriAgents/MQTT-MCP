@@ -22,7 +22,8 @@ how it lines up with the equivalent tool elsewhere in the suite.
 **Does it publish to the broker?**
 - [ ] No, it is read-only
 - [ ] Yes, it publishes (say whether that includes Sparkplug `NCMD`/`DCMD` or
-      retained messages, which can change physical equipment)
+      retained messages, which can change physical equipment). Such tools are
+      gated behind `MQTT_WRITES_ENABLED`.
 
 **Can the mock exercise it?**
 What the mock edge node would need to simulate for this to be testable without

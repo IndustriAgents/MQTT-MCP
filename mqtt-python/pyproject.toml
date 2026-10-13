@@ -4,15 +4,48 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mqtt-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MQTT + Sparkplug B MCP server"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.9.1,<2",
-    "paho-mqtt>=1.6.1",
-    "protobuf>=4.24.0",
+    # Imported directly (task groups, cancel scopes). 4.7 is the lowest version the
+    # rest of the dependency tree allows (sse-starlette), so the one actually tested.
+    "anyio>=4.7",
+    # FastMCP internals are used, hence <2. mcp 1.12.0-1.12.2 break the session when a
+    # client cancels two running calls (found by the lowest-direct job).
+    "mcp[cli]>=1.12.3,<2",
+    # The client uses the paho-mqtt 2.x API (CallbackAPIVersion.VERSION2).
+    "paho-mqtt>=2.0,<3",
+    # sparkplug_b_pb2 builds its descriptor at runtime (no protoc gencode); 5.27 is the
+    # oldest runtime that loads on Python 3.14 (checked by CI's lowest-direct job).
+    "protobuf>=5.27",
+    "python-dotenv>=1.0",
+    # Imported directly (StrictInt, StrictBool, ValidationError). pydantic-core has no
+    # Python 3.14 wheels before pydantic 2.12.
+    "pydantic>=2.8,<3; python_version < '3.14'",
+    "pydantic>=2.12,<3; python_version >= '3.14'",
 ]
 
 [project.scripts]
 mqtt-mcp = "mqtt_mcp.cli:main"
 
+[dependency-groups]
+dev = [
+    "cryptography>=42",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: needs an MQTT broker (MQTT_TEST_BROKER_URL, or mosquitto on PATH)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
