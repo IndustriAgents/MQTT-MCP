@@ -33,8 +33,8 @@ Rebuilding can change archive hashes; these identify the verified files.
 
 | Artifact | SHA-256 |
 |---|---|
-| `industriagents_mqtt_mcp-0.3.0-py3-none-any.whl` | `e5f52521e9b65ba8b27b1caf46eac5f8932b6112a26297c70155eed213d1aaf0` |
-| `industriagents_mqtt_mcp-0.3.0.tar.gz` | `3a6f0d5b90cb30a1e794addd5e59e0362fe9a9a7346eb3625da204a3a2501aa4` |
-| `industriagents-mqtt-mcp-0.3.0.tgz` | `8f175bd57ddf02602c31968d01814f07258e0f48c396876ea48d6024977a84c9` |
+| `industriagents_mqtt_mcp-0.3.0-py3-none-any.whl` | `6481ab76312f41f3282b0567652e5a50ae279c51b6bf54615ad63467eaf858f0` |
+| `industriagents_mqtt_mcp-0.3.0.tar.gz` | `5a4ba56f7fd89435dc9e233133cc063eb754d452c391c506f41537d75b043581` |
+| `industriagents-mqtt-mcp-0.3.0.tgz` | `4cf676215f4a8ffc421596e39616bbfcacb0e2cf5bea1e41565ca75f38c8e40c` |
 
 See [release instructions](release.md) for independent registry publication.
