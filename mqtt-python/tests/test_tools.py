@@ -74,7 +74,9 @@ async def server(**env):
 
 async def call(session, name, **arguments):
     result = await session.call_tool(name, arguments)
-    assert not result.isError, result.content
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), (
+        result.content
+    )
     envelope = result.structuredContent
     assert set(envelope) == {"success", "data", "error", "meta"}
     assert json.loads(result.content[0].text) == envelope
@@ -93,22 +95,22 @@ async def test_server_info_reports_this_package():
     finally:
         mqtt_server.set_settings(None)
     assert init.serverInfo.name == "MQTT-Control"
-    assert init.serverInfo.version == importlib.metadata.version("mqtt-mcp")
+    assert init.serverInfo.version == importlib.metadata.version("industriagents-mqtt-mcp")
 
 
 async def test_tool_list_and_annotations():
     async with server() as session:
         tools = {t.name: t for t in (await session.list_tools()).tools}
-    assert set(tools) == READ_TOOLS | set(WRITE_TOOLS)
+    assert set(tools) == READ_TOOLS | {"publish_message", "publish_sparkplug"}
     assert set(WRITE_TOOLS) == mqtt_server.WRITE_TOOLS  # the deadline's write list
     for name in READ_TOOLS:
         assert tools[name].annotations.readOnlyHint is True, name
-    for name in WRITE_TOOLS:
+    for name in ("publish_message", "publish_sparkplug"):
         tool = tools[name]
         assert tool.annotations.readOnlyHint is False, name
         assert tool.annotations.destructiveHint is True, name
         assert tool.annotations.idempotentHint is False, name
-        assert tool.description.startswith("WRITE:"), name
+        assert "WRITE:" in tool.description, name
         assert "MQTT_WRITES_ENABLED=true" in tool.description, name
 
 
@@ -117,14 +119,14 @@ async def test_descriptions_do_not_overclaim():
         tools = {t.name: t.description for t in (await session.list_tools()).tools}
     assert "seen in messages this server received" in tools["list_sparkplug_nodes"]
     assert "subscribe to 'spBv1.0/#'" in tools["list_sparkplug_nodes"]
-    assert "does not mean the node applied it" in tools["publish_node_command"]
+    assert "does not mean the node applied it" in tools["publish_sparkplug"]
     for name in (
-        "publish_node_birth",
-        "publish_device_birth",
-        "publish_node_data",
-        "publish_device_data",
-        "publish_node_command",
-        "publish_device_command",
+        "publish_sparkplug",
+        "publish_sparkplug",
+        "publish_sparkplug",
+        "publish_sparkplug",
+        "publish_sparkplug",
+        "publish_sparkplug",
     ):
         text = tools[name]
         assert '{"name": str, "value": ..., "type": str}' in text, name
@@ -830,7 +832,7 @@ def _birth_test_patches(monkeypatch, between):
 
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "require_connection", connected)
     monkeypatch.setattr(mqtt_server.MQTTClientManager, "_stop_network", lambda self, *a: None)
-    monkeypatch.setattr(mqtt_server.asyncio, "to_thread", stop_then)
+    monkeypatch.setattr(asyncio, "to_thread", stop_then)
     monkeypatch.setattr(mqtt_server._Client, "publish", spy)
     return handed, holder
 

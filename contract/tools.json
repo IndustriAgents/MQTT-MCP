@@ -1,0 +1,1166 @@
+{
+  "schemaVersion": 1,
+  "protocol": "mqtt",
+  "transport": "stdio",
+  "tools": [
+    {
+      "name": "publish_sparkplug",
+      "description": "Select one message_type mode and provide only its parameters.\n\nNBIRTH: WRITE: make this server a Sparkplug B edge node and publish its NBIRTH.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nThe node is SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID (see get_broker_info);\nit must not be the ID of a real edge node. If no NDEATH will is registered\non the current connection yet, the server first reconnects with an NDEATH\nLast Will carrying a new bdSeq, so the broker announces the node's death if\nthe server disappears. The NBIRTH has seq 0 and automatically includes the\n'bdSeq' and 'Node Control/Rebirth' (false) metrics. Publishing NBIRTH again\nis a rebirth: devices must then be born again. The server does not act on\ncommands (including rebirth requests) sent to its own node. After an\nunexpected disconnect the node is dead and needs a new NBIRTH.\n\nParameters:\n    metrics: the node's metrics (optional). A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\ndata: topic, seq, bd_seq, metric count and delivery (QoS 0, as the\nspecification requires for NBIRTH).\n\n\nNDEATH: WRITE: publish this server's NDEATH (edge node goes offline).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nOnly possible after publish_node_birth. The payload carries the bdSeq of the\nNBIRTH and no seq, as the specification requires; it is sent with QoS 1 and\nconfirmed by the broker. All of the node's devices count as dead afterwards.\nThe server then reconnects without the NDEATH will, so that the broker does\nnot announce the death a second time; the next NBIRTH uses a new bdSeq.\n\n\nDBIRTH: WRITE: publish a DBIRTH for a device of this server's edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a born node (publish_node_birth first). Uses the node's next seq.\n\nParameters:\n    device_id: device ID (no '+', '/' or '#').\n    metrics: all metrics of the device (may be empty). A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nDDEATH: WRITE: publish a DDEATH for a device born with publish_device_birth.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nParameters:\n    device_id: a device this server has published a DBIRTH for.\n\n\nNDATA: WRITE: publish NDATA (new values of this server's node metrics).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a born node (publish_node_birth first). Uses the node's next seq.\n\nParameters:\n    metrics: at least one metric. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nDDATA: WRITE: publish DDATA (new values of a device born by this server).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a DBIRTH for the device (publish_device_birth). Uses the node's next seq.\n\nParameters:\n    device_id: a device this server has published a DBIRTH for.\n    metrics: at least one metric. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nNCMD: WRITE: send a Sparkplug B NCMD to an edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nA command can change real equipment: the edge node applies the metrics it\nreceives. It is sent at most once. success:true (meta.outcome \"written\") only\nmeans the NCMD was written to the network (QoS 0, as the specification\nrequires); it does not mean the node applied it. Watch its NDATA\n(read_messages) to confirm. meta.outcome \"unknown\" means it may have gone out:\ncheck before retrying. Example: {\"name\": \"Node Control/Rebirth\",\n\"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n\nParameters:\n    metrics: at least one metric to write. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n    edge_node_id: target edge node (required; there is no default target).\n    group_id: target group (default: SPARKPLUG_GROUP_ID).\n\n\nDCMD: WRITE: send a Sparkplug B DCMD to a device of an edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nA command can change real equipment: the edge node applies the metrics to\nthe device. It is sent at most once. success:true (meta.outcome \"written\")\nonly means the DCMD was written to the network (QoS 0, as the specification\nrequires); it does not mean the device applied it. Watch its DDATA\n(read_messages) to confirm. meta.outcome \"unknown\" means it may have gone out:\ncheck before retrying.\n\nParameters:\n    device_id: target device ID.\n    metrics: at least one metric to write. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n    edge_node_id: edge node the device belongs to (required; no default target).\n    group_id: target group (default: SPARKPLUG_GROUP_ID).\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "metrics": {
+            "anyOf": [
+              {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Metrics"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              }
+            ],
+            "description": "metrics for the selected operation; see its mode description."
+          },
+          "message_type": {
+            "anyOf": [
+              {
+                "const": "NBIRTH",
+                "type": "string"
+              },
+              {
+                "const": "NDEATH",
+                "type": "string"
+              },
+              {
+                "const": "DBIRTH",
+                "type": "string"
+              },
+              {
+                "const": "DDEATH",
+                "type": "string"
+              },
+              {
+                "const": "NDATA",
+                "type": "string"
+              },
+              {
+                "const": "DDATA",
+                "type": "string"
+              },
+              {
+                "const": "NCMD",
+                "type": "string"
+              },
+              {
+                "const": "DCMD",
+                "type": "string"
+              }
+            ],
+            "description": "Select the message_type mode described above."
+          },
+          "device_id": {
+            "title": "Device Id",
+            "type": "string",
+            "description": "device id for the selected operation; see its mode description."
+          },
+          "edge_node_id": {
+            "title": "Edge Node Id",
+            "type": "string",
+            "description": "edge node id for the selected operation; see its mode description."
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Group Id",
+            "description": "group id for the selected operation; see its mode description."
+          }
+        },
+        "required": [
+          "message_type"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "metrics": {
+                "anyOf": [
+                  {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Metrics"
+              },
+              "message_type": {
+                "const": "NBIRTH",
+                "type": "string"
+              }
+            },
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "message_type"
+            ]
+          },
+          {
+            "properties": {
+              "message_type": {
+                "const": "NDEATH",
+                "type": "string"
+              }
+            },
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "message_type"
+            ]
+          },
+          {
+            "properties": {
+              "device_id": {
+                "title": "Device Id",
+                "type": "string"
+              },
+              "metrics": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              },
+              "message_type": {
+                "const": "DBIRTH",
+                "type": "string"
+              }
+            },
+            "required": [
+              "device_id",
+              "metrics",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "device_id": {
+                "title": "Device Id",
+                "type": "string"
+              },
+              "message_type": {
+                "const": "DDEATH",
+                "type": "string"
+              }
+            },
+            "required": [
+              "device_id",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "metrics": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              },
+              "message_type": {
+                "const": "NDATA",
+                "type": "string"
+              }
+            },
+            "required": [
+              "metrics",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "device_id": {
+                "title": "Device Id",
+                "type": "string"
+              },
+              "metrics": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              },
+              "message_type": {
+                "const": "DDATA",
+                "type": "string"
+              }
+            },
+            "required": [
+              "device_id",
+              "metrics",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "edge_node_id": {
+                "title": "Edge Node Id",
+                "type": "string"
+              },
+              "metrics": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              },
+              "group_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Group Id"
+              },
+              "message_type": {
+                "const": "NCMD",
+                "type": "string"
+              }
+            },
+            "required": [
+              "edge_node_id",
+              "metrics",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "edge_node_id": {
+                "title": "Edge Node Id",
+                "type": "string"
+              },
+              "device_id": {
+                "title": "Device Id",
+                "type": "string"
+              },
+              "metrics": {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "title": "Metrics",
+                "type": "array"
+              },
+              "group_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "title": "Group Id"
+              },
+              "message_type": {
+                "const": "DCMD",
+                "type": "string"
+              }
+            },
+            "required": [
+              "edge_node_id",
+              "device_id",
+              "metrics",
+              "message_type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_broker_info",
+      "description": "Report the broker connection and this server's configuration and state.\n\ndata: broker URL (credentials never shown), whether TLS is on, the client ID,\nwhether the server is connected right now and the last connection error,\nwhether writes are enabled (MQTT_WRITES_ENABLED), the subscriptions held, the\nnumber of buffered received messages, and the state of this server's own\nSparkplug B edge node (born or not, bdSeq, devices born). Does not contact\nthe broker.\n",
+      "inputSchema": {
+        "properties": {},
+        "title": "get_broker_infoArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "subscribe_topic",
+      "description": "Subscribe this server to an MQTT topic filter so that matching messages are kept.\n\nReceived messages go into a buffer that read_messages returns (the newest\nMQTT_MESSAGE_BUFFER_SIZE, default 1000); Sparkplug B messages also update\nlist_sparkplug_nodes. A broker sends retained messages for the filter right\naway. Subscriptions are restored automatically after a reconnect.\n\nParameters:\n    topic: topic filter; '+' matches one level, '#' the rest (e.g. 'sensors/#',\n        'spBv1.0/#'). Filters starting with '$' other than '$SYS/' are broker\n        extensions such as shared ($share/, $queue/) or exclusive ($exclusive/)\n        subscriptions that change what other clients receive; they are refused\n        unless writes are enabled.\n    qos: maximum QoS for delivery to this server: 0, 1 or 2 (default 0).\n\ndata: the filter and the QoS the broker granted (success only after SUBACK).\n",
+      "inputSchema": {
+        "properties": {
+          "topic": {
+            "title": "Topic",
+            "type": "string",
+            "description": "topic for the selected operation; see its mode description."
+          },
+          "qos": {
+            "default": 0,
+            "title": "Qos",
+            "type": "integer",
+            "description": "qos for the selected operation; see its mode description."
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "subscribe_topicArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "unsubscribe_topic",
+      "description": "Remove one of this server's subscriptions (exactly as listed by list_subscriptions).\n\nAlready buffered messages stay readable. Fails if this server holds no\nsubscription with that exact filter.\n\nParameters:\n    topic: the subscribed topic filter, e.g. 'sensors/#'.\n",
+      "inputSchema": {
+        "properties": {
+          "topic": {
+            "title": "Topic",
+            "type": "string",
+            "description": "topic for the selected operation; see its mode description."
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "unsubscribe_topicArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "list_subscriptions",
+      "description": "List the subscriptions this server holds, with the QoS the broker granted.\n\ndata: a list of {topic, qos}. Only this server's own subscriptions; the\nbroker's other clients are not visible. Does not contact the broker.\n",
+      "inputSchema": {
+        "properties": {},
+        "title": "list_subscriptionsArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "read_messages",
+      "description": "Return messages this server has received on its subscriptions.\n\nOnly messages that arrived after subscribe_topic are available, and only the\nnewest MQTT_MESSAGE_BUFFER_SIZE (default 1000) are kept. Each message has an\nincreasing id, topic, qos, retain flag, received_at (UTC), payload (UTF-8 text,\nor hex for binary and Sparkplug payloads) and, for Sparkplug B topics, the\ndecoded payload under 'sparkplug'.\n\nParameters:\n    topic_filter: only messages whose topic matches this filter (+/# allowed).\n    limit: at most this many messages, 1-1000 (default 50).\n    since_id: only messages with an id greater than this, oldest first; pass\n        meta.last_id from the previous call to poll for new messages. Without\n        since_id the newest `limit` messages are returned (oldest first).\n\nmeta: returned, has_more, buffered, dropped_total, last_id, and\nmissed_messages=true if messages after since_id were already dropped. Ids\nstart again at 1 when the server restarts.\n",
+      "inputSchema": {
+        "properties": {
+          "topic_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Topic Filter",
+            "description": "topic filter for the selected operation; see its mode description."
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer",
+            "description": "limit for the selected operation; see its mode description."
+          },
+          "since_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Since Id",
+            "description": "since id for the selected operation; see its mode description."
+          }
+        },
+        "title": "read_messagesArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_sparkplug_nodes",
+      "description": "List Sparkplug B edge nodes and devices seen in messages this server received.\n\nDiscovery is passive: a node appears only after one of its NBIRTH, NDATA,\nNDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this\nserver holds (subscribe to 'spBv1.0/#', or 'spBv1.0/<group>/#', first). Births\nare not retained, so a node that was born before the subscription shows up\nwith its next data message; metrics that its data messages send without a\ndatatype then show their raw stored value until the node is reborn.\n\ndata.nodes: per node group_id, edge_node_id, online (true/false, or null if\nunknown), last_message_type, last_seen, bd_seq, the latest metric values, and\nits devices with the same fields. data.this_server: the edge node this server\nitself publishes as (see publish_node_birth). Does not contact the broker.\n",
+      "inputSchema": {
+        "properties": {},
+        "title": "list_sparkplug_nodesArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "decode_sparkplug_payload",
+      "description": "Decode a hex-encoded Sparkplug B protobuf payload (as read_messages shows it).\n\nParameters:\n    payload_hex: the payload bytes as hex (spaces and a 0x prefix are ignored).\n\ndata: timestamp, seq (null if absent), and metrics with name, alias,\ntimestamp, datatype and value. Signed integer types are shown as signed\nnumbers when the metric carries its datatype; a metric without datatype\n(allowed in DATA and CMD messages) shows its raw stored value. Fails with\nsuccess:false if the hex is invalid or the bytes cannot be parsed as the\nSparkplug B protobuf (protobuf cannot tell every other byte string apart, so\nsuccess does not prove the bytes came from a Sparkplug node).\n",
+      "inputSchema": {
+        "properties": {
+          "payload_hex": {
+            "title": "Payload Hex",
+            "type": "string",
+            "description": "payload hex for the selected operation; see its mode description."
+          }
+        },
+        "required": [
+          "payload_hex"
+        ],
+        "title": "decode_sparkplug_payloadArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "publish_message",
+      "description": "WRITE: publish a UTF-8 text message to an MQTT topic.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nAny subscriber gets the message, and on a plant network that can include\ndevices that act on it, so this is gated like the Sparkplug commands. With\nretain=true the broker keeps the message and hands it to every future\nsubscriber.\n\nParameters:\n    topic: topic name without wildcards, e.g. 'sensors/temp'.\n    payload: message text (sent as UTF-8).\n    qos: 0, 1 or 2 (default 0).\n    retain: keep the message on the broker as the topic's retained message.\n\nSent at most once: success:true (meta.outcome \"written\") means QoS 0: written\nto the network (the broker does not acknowledge QoS 0); QoS 1/2: the broker\nacknowledged it (an MQTT 3.1.1 broker acknowledges even a publish its ACL\ndrops). meta.outcome \"not_sent\" means nothing left the server. \"unknown\"\nmeans it may have reached the broker: the server does not send it again, so\ncheck before retrying. If the connection drops while the call waits for the\nacknowledgement, the message is given up (never resent on reconnect).\n",
+      "inputSchema": {
+        "properties": {
+          "topic": {
+            "title": "Topic",
+            "type": "string",
+            "description": "topic for the selected operation; see its mode description."
+          },
+          "payload": {
+            "title": "Payload",
+            "type": "string",
+            "description": "payload for the selected operation; see its mode description."
+          },
+          "qos": {
+            "default": 0,
+            "title": "Qos",
+            "type": "integer",
+            "description": "qos for the selected operation; see its mode description."
+          },
+          "retain": {
+            "default": false,
+            "title": "Retain",
+            "type": "boolean",
+            "description": "retain for the selected operation; see its mode description."
+          }
+        },
+        "required": [
+          "topic",
+          "payload"
+        ],
+        "title": "publish_messageArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    }
+  ],
+  "routes": {
+    "publish_sparkplug": {
+      "selector": "message_type",
+      "options": {
+        "NBIRTH": "publish_node_birth",
+        "NDEATH": "publish_node_death",
+        "DBIRTH": "publish_device_birth",
+        "DDEATH": "publish_device_death",
+        "NDATA": "publish_node_data",
+        "DDATA": "publish_device_data",
+        "NCMD": "publish_node_command",
+        "DCMD": "publish_device_command"
+      }
+    },
+    "get_broker_info": {
+      "handler": "get_broker_info"
+    },
+    "subscribe_topic": {
+      "handler": "subscribe_topic"
+    },
+    "unsubscribe_topic": {
+      "handler": "unsubscribe_topic"
+    },
+    "list_subscriptions": {
+      "handler": "list_subscriptions"
+    },
+    "read_messages": {
+      "handler": "read_messages"
+    },
+    "list_sparkplug_nodes": {
+      "handler": "list_sparkplug_nodes"
+    },
+    "decode_sparkplug_payload": {
+      "handler": "decode_sparkplug_payload"
+    },
+    "publish_message": {
+      "handler": "publish_message"
+    }
+  },
+  "legacy": {
+    "publish_node_birth": "publish_sparkplug",
+    "publish_node_death": "publish_sparkplug",
+    "publish_device_birth": "publish_sparkplug",
+    "publish_device_death": "publish_sparkplug",
+    "publish_node_data": "publish_sparkplug",
+    "publish_device_data": "publish_sparkplug",
+    "publish_node_command": "publish_sparkplug",
+    "publish_device_command": "publish_sparkplug",
+    "get_broker_info": "get_broker_info",
+    "subscribe_topic": "subscribe_topic",
+    "unsubscribe_topic": "unsubscribe_topic",
+    "list_subscriptions": "list_subscriptions",
+    "read_messages": "read_messages",
+    "list_sparkplug_nodes": "list_sparkplug_nodes",
+    "decode_sparkplug_payload": "decode_sparkplug_payload",
+    "publish_message": "publish_message"
+  },
+  "legacySchemas": {
+    "get_broker_info": {
+      "properties": {},
+      "title": "get_broker_infoArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "subscribe_topic": {
+      "properties": {
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        },
+        "qos": {
+          "default": 0,
+          "title": "Qos",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "title": "subscribe_topicArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "unsubscribe_topic": {
+      "properties": {
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "title": "unsubscribe_topicArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "list_subscriptions": {
+      "properties": {},
+      "title": "list_subscriptionsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_messages": {
+      "properties": {
+        "topic_filter": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic Filter"
+        },
+        "limit": {
+          "default": 50,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "since_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since Id"
+        }
+      },
+      "title": "read_messagesArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "list_sparkplug_nodes": {
+      "properties": {},
+      "title": "list_sparkplug_nodesArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "decode_sparkplug_payload": {
+      "properties": {
+        "payload_hex": {
+          "title": "Payload Hex",
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload_hex"
+      ],
+      "title": "decode_sparkplug_payloadArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_message": {
+      "properties": {
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        },
+        "payload": {
+          "title": "Payload",
+          "type": "string"
+        },
+        "qos": {
+          "default": 0,
+          "title": "Qos",
+          "type": "integer"
+        },
+        "retain": {
+          "default": false,
+          "title": "Retain",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "topic",
+        "payload"
+      ],
+      "title": "publish_messageArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_node_birth": {
+      "properties": {
+        "metrics": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Metrics"
+        }
+      },
+      "title": "publish_node_birthArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_node_death": {
+      "properties": {},
+      "title": "publish_node_deathArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_device_birth": {
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Metrics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "device_id",
+        "metrics"
+      ],
+      "title": "publish_device_birthArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_device_death": {
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_id"
+      ],
+      "title": "publish_device_deathArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_node_data": {
+      "properties": {
+        "metrics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Metrics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "metrics"
+      ],
+      "title": "publish_node_dataArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_device_data": {
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Metrics",
+          "type": "array"
+        }
+      },
+      "required": [
+        "device_id",
+        "metrics"
+      ],
+      "title": "publish_device_dataArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_node_command": {
+      "properties": {
+        "edge_node_id": {
+          "title": "Edge Node Id",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        }
+      },
+      "required": [
+        "edge_node_id",
+        "metrics"
+      ],
+      "title": "publish_node_commandArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "publish_device_command": {
+      "properties": {
+        "edge_node_id": {
+          "title": "Edge Node Id",
+          "type": "string"
+        },
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "metrics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        }
+      },
+      "required": [
+        "edge_node_id",
+        "device_id",
+        "metrics"
+      ],
+      "title": "publish_device_commandArguments",
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": [
+      "success",
+      "data",
+      "error",
+      "meta"
+    ],
+    "properties": {
+      "success": {
+        "type": "boolean"
+      },
+      "data": {},
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "meta": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  },
+  "localStatusTools": [
+    "get_broker_info"
+  ]
+}

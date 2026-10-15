@@ -26,3 +26,8 @@ dist/
 # Editors
 .vscode/
 .idea/
+
+# Release artifacts
+npm/vendor/*.whl
+npm/*.tgz
+dist/

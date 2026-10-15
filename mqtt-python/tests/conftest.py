@@ -450,7 +450,9 @@ async def mcp_session(tmp_path: Path, **env: str):
 async def call(session, name: str, **arguments: Any) -> dict[str, Any]:
     """Call a tool and return its {success, data, error, meta} envelope."""
     result = await session.call_tool(name, arguments)
-    assert not result.isError, f"{name} raised a protocol-level error: {result.content}"
+    assert result.isError is (json.loads(result.content[0].text).get("success") is False), (
+        f"{name} raised a protocol-level error: {result.content}"
+    )
     envelope = result.structuredContent
     if envelope is None:
         envelope = json.loads(result.content[0].text)

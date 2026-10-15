@@ -35,11 +35,12 @@ EVERY_TOOL = {
 STRAY_PRINT = (
     "import sys\n"
     "from mqtt_mcp import cli, mqtt_server\n"
-    "original = mqtt_server._ok\n"
+    "from mqtt_mcp.application import diagnostics\n"
+    "original = diagnostics._ok\n"
     "def noisy(*args, **kwargs):\n"
     "    print('stray debug output')\n"
     "    return original(*args, **kwargs)\n"
-    "mqtt_server._ok = noisy\n"
+    "diagnostics._ok = noisy\n"
     "sys.argv = ['mqtt-mcp']\n"
     "cli.main()\n"
 )
@@ -180,7 +181,17 @@ def test_stdout_carries_only_json_rpc(tmp_path):
     env = offline_env()
     assert env["PYTHONUNBUFFERED"] == "1"
     responses, listed, stray, stderr = drive([str(SERVER_EXE)], tmp_path, env, EVERY_TOOL)
-    assert listed == set(EVERY_TOOL), "add new tools to EVERY_TOOL"
+    assert listed == {
+        "list_sparkplug_nodes",
+        "subscribe_topic",
+        "read_messages",
+        "list_subscriptions",
+        "get_broker_info",
+        "unsubscribe_topic",
+        "publish_message",
+        "decode_sparkplug_payload",
+        "publish_sparkplug",
+    }, "add new tools to EVERY_TOOL"
     assert stray == []
     for number, name in enumerate(EVERY_TOOL, start=3):
         envelope = responses[number]["result"]["structuredContent"]

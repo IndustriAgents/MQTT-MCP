@@ -81,7 +81,7 @@ def implicit_env_file() -> str | None:
         return None
     try:
         with open(os.path.join(project_dir, "pyproject.toml"), encoding="utf-8") as f:
-            if 'name = "mqtt-mcp"' not in f.read():
+            if 'name = "industriagents-mqtt-mcp"' not in f.read():
                 return None
     except OSError:
         return None

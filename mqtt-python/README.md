@@ -1,3 +1,10 @@
+> **0.3.0 package and tool migration:** Install `industriagents-mqtt-mcp`
+> from npm (requires uv) or PyPI; the command remains `mqtt-mcp`.
+> The advertised catalog now contains **9 tools**. Older tool names in
+> the examples below remain compatibility calls. See the
+> [architecture and canonical tool guide](../docs/architecture.md)
+> and [release guide](../docs/release.md).
+
 # MQTT MCP Server (Python/FastMCP)
 
 Python implementation of an MQTT + Sparkplug B MCP server using FastMCP.
