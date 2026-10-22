@@ -5,6 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 
 
+class Refusal(ValueError):
+    """A call refused before dispatch; ``code`` is one of the contract's ``errors``."""
+
+    def __init__(self, message: str, code: str = "policy_denied"):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class Policy:
     read_only: bool = False

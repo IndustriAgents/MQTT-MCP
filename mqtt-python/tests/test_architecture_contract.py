@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 from mcp.server.fastmcp import FastMCP
 
 from mqtt_mcp.application.execution import Execution
@@ -203,3 +203,154 @@ def test_only_declared_local_status_tools_use_reserved_capacity():
         result = envelope_of(run(b.call_tool(name, args)))
         assert result["success"] is (name in local_names), name
     b.execution.finish(ticket, None)
+
+
+def _properties(schema):
+    yield from schema.get("properties", {}).items()
+
+
+def test_every_argument_is_described_for_agents():
+    """Agents read property descriptions; a placeholder there teaches nothing."""
+    b, _ = boundary()
+    for name, tool in b.tools.items():
+        for prop, spec in _properties(tool["inputSchema"]):
+            text = spec.get("description", "")
+            assert len(text) >= 20, (name, prop)
+            assert "for the selected operation" not in text, (name, prop)
+            assert "title" not in spec, (name, prop)
+
+
+def test_documented_ranges_are_in_the_schema():
+    b, _ = boundary()
+    for name in ("subscribe_topic", "publish_message"):
+        assert b.tools[name]["inputSchema"]["properties"]["qos"]["enum"] == [0, 1, 2]
+    limit = b.tools["read_messages"]["inputSchema"]["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"]) == (1, 1000)
+    sparkplug = b.tools["publish_sparkplug"]["inputSchema"]
+    assert sparkplug["properties"]["message_type"]["enum"] == list(
+        b.contract["routes"]["publish_sparkplug"]["options"]
+    )
+    metric = sparkplug["properties"]["metrics"]["items"]
+    assert metric["required"] == ["name", "value", "type"]
+    assert metric["additionalProperties"] is False
+
+
+def test_output_schemas_embed_the_declared_result_shapes_and_error_codes():
+    b, _ = boundary()
+    codes = [k for k in b.contract["errors"] if k != "$comment"]
+    for name, tool in b.tools.items():
+        output = tool["outputSchema"]
+        Draft202012Validator.check_schema(output)
+        shape = b.contract["routes"][name]["resultShape"]
+        assert output["properties"]["data"]["anyOf"][1] == b.contract["resultShapes"][shape]
+        assert output["properties"]["meta"]["properties"]["code"]["enum"] == codes
+        ok = {"success": True, "data": None, "error": None, "meta": {}}
+        Draft202012Validator(output).validate(ok)
+        failed = {"success": False, "data": None, "error": "x", "meta": {}}
+        with pytest.raises(ValidationError):
+            Draft202012Validator(output).validate(failed)  # a failure must carry a code
+        Draft202012Validator(output).validate({**failed, "meta": {"code": "invalid_arguments"}})
+
+
+def test_every_refusal_carries_a_code():
+    b, _ = boundary(Policy(allowed_tools=()))
+    assert envelope_of(run(b.call_tool("get_broker_info", {})))["meta"]["code"] == "policy_denied"
+    b, _ = boundary(Policy(read_only=True))
+    result = envelope_of(run(b.call_tool("publish_message", {"topic": "a", "payload": "x"})))
+    assert result["meta"]["code"] == "policy_denied"
+    b, _ = boundary(Policy(max_in_flight=1))
+    ticket = b.execution.admit("busy", "busy", write=False, local=False)
+    result = envelope_of(run(b.call_tool("read_messages", {})))
+    assert result["meta"]["code"] == "resource_limit"
+    b.execution.finish(ticket, None)
+
+
+MODE_ERRORS = [
+    ({"message_type": "NCMD", "metrics": []}, "edge_node_id is required"),
+    (
+        {"message_type": "NCMD", "edge_node_id": "n", "metrics": []},
+        "metrics must be a list of at least 1 item(s)",
+    ),
+    (
+        {"message_type": "NDATA", "metrics": [{"name": "m", "value": 1}]},
+        "metrics[0].type is required",
+    ),
+    (
+        {"message_type": "NDATA", "metrics": [{"name": "m", "value": 1, "type": "int32", "u": 1}]},
+        "unknown argument(s) in metrics[0]: u",
+    ),
+    (
+        {"message_type": "NDEATH", "device_id": "d"},
+        "unknown argument(s): device_id; accepted: message_type",
+    ),
+    ({"message_type": "BIRTH"}, "message_type must be NBIRTH, NDEATH, DBIRTH,"),
+    ({"metrics": []}, "message_type is required and must be NBIRTH,"),
+    ({"message_type": "DDEATH", "device_id": ""}, "device_id must be a non-empty string"),
+]
+
+
+@pytest.mark.parametrize(("arguments", "message"), MODE_ERRORS)
+def test_mode_errors_name_the_argument_and_the_fix(arguments, message):
+    b, calls = boundary()
+    result = envelope_of(run(b.call_tool("publish_sparkplug", arguments)))
+    assert result["success"] is False
+    assert message in result["error"], result["error"]
+    assert result["meta"] == {
+        "tool": "publish_sparkplug",
+        "code": "invalid_arguments",
+        "outcome": "not_sent",
+        "request_sent": False,
+    }
+    assert calls == []
+
+
+CANONICAL_ERRORS = [
+    ("read_messages", {"limit": 0}, "limit must be at least 1"),
+    ("read_messages", {"limit": 1001}, "limit must be at most 1000"),
+    ("read_messages", {"since_id": -1}, "since_id must be at least 0"),
+    ("read_messages", {"limit": "5"}, "limit must be an integer"),
+    ("subscribe_topic", {"topic": "a", "qos": 3}, "qos must be 0, 1 or 2"),
+    ("subscribe_topic", {}, "topic is required"),
+    (
+        "publish_message",
+        {"topic": "a", "payload": "x", "retain": 1},
+        "retain must be true or false",
+    ),
+    ("get_broker_info", {"verbose": True}, "unknown argument(s): verbose; accepted: none"),
+]
+
+
+@pytest.mark.parametrize(("name", "arguments", "message"), CANONICAL_ERRORS)
+def test_advertised_tools_are_held_to_their_contract_schema(name, arguments, message):
+    b, calls = boundary()
+    result = envelope_of(run(b.call_tool(name, arguments)))
+    assert result["success"] is False and result["meta"]["code"] == "invalid_arguments"
+    assert message in result["error"], result["error"]
+    assert calls == []
+
+
+def test_schema_errors_never_echo_argument_values():
+    b, _ = boundary()
+    secret = "hunter2-token"
+    for arguments in (
+        {"topic": "a", "payload": "x", "qos": secret},
+        {"topic": "a", "payload": "x", secret: 1},
+    ):
+        result = envelope_of(run(b.call_tool("publish_message", arguments)))
+        assert result["success"] is False
+        if secret in arguments:  # an unknown argument's name is not a value
+            continue
+        assert secret not in result["error"]
+
+
+def test_metric_types_stay_case_insensitive_at_the_boundary():
+    """The README documents case-insensitive metric types; the schema must not narrow that."""
+    b, calls = boundary()
+    arguments = {
+        "message_type": "DCMD",
+        "edge_node_id": "n",
+        "device_id": "d",
+        "metrics": [{"name": "m", "value": 1, "type": "Int32"}],
+    }
+    assert envelope_of(run(b.call_tool("publish_sparkplug", arguments)))["success"] is True
+    assert calls[-1][0] == "publish_device_command"

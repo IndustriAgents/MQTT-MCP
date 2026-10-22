@@ -20,7 +20,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 from mqtt_mcp import mqtt_server
 from mqtt_mcp.config import load_settings
 
-from .conftest import free_port
+from .conftest import check_envelope, free_port
 
 pytestmark = pytest.mark.anyio
 
@@ -80,6 +80,7 @@ async def call(session, name, **arguments):
     envelope = result.structuredContent
     assert set(envelope) == {"success", "data", "error", "meta"}
     assert json.loads(result.content[0].text) == envelope
+    check_envelope(name, envelope)
     return envelope
 
 
@@ -356,7 +357,7 @@ async def test_birth_refused_without_a_registered_will(monkeypatch):
         result = await call(session, "publish_node_birth", metrics=[])
     assert result["success"] is False
     assert "no NDEATH will" in result["error"]
-    assert result["meta"] == {"outcome": "not_sent", "request_sent": False}
+    assert result["meta"] == {"outcome": "not_sent", "request_sent": False, "code": "send_failed"}
     assert published == []
 
 
@@ -408,7 +409,11 @@ async def test_message_written_before_a_drop_is_unknown(monkeypatch):
         result = await call(session, "publish_node_birth", metrics=[])
         info = await call(session, "get_broker_info")
     assert result["success"] is False
-    assert result["meta"] == {"outcome": "unknown", "request_sent": True}
+    assert result["meta"] == {
+        "outcome": "unknown",
+        "request_sent": True,
+        "code": "outcome_unknown",
+    }
     assert "may have been applied; check before retrying" in result["error"]
     assert info["data"]["sparkplug"]["node_born"] is False
 
@@ -515,7 +520,12 @@ async def test_a_peer_that_is_not_a_broker_gives_clean_failures(reply):
     assert "MQTT broker" in info["data"]["last_error"]  # says why, not null
     assert read["success"] is False and "Not connected" in read["error"]
     assert write["success"] is False
-    assert write["meta"] == {"outcome": "not_sent", "request_sent": False, "device_id": "d"}
+    assert write["meta"] == {
+        "outcome": "not_sent",
+        "request_sent": False,
+        "device_id": "d",
+        "code": "endpoint_offline",
+    }
 
 
 def test_withdraw_detects_a_packet_written_during_removal():
@@ -741,7 +751,12 @@ async def test_a_connection_that_arrives_after_the_deadline_sends_nothing(monkey
     async with server(MQTT_WRITES_ENABLED="true", MQTT_TOOL_TIMEOUT="0.3") as session:
         for qos in (0, 1):
             result = await call(session, "publish_message", topic="a/b", payload="x", qos=qos)
-            assert result["meta"] == {"outcome": "not_sent", "request_sent": False, "topic": "a/b"}
+            assert result["meta"] == {
+                "outcome": "not_sent",
+                "request_sent": False,
+                "topic": "a/b",
+                "code": "deadline_exceeded",
+            }
             assert "deadline" in result["error"]
     assert handed == []
 
@@ -879,3 +894,55 @@ async def test_a_birth_whose_deadline_passes_during_the_restart_registers_no_wil
     assert birth["meta"]["outcome"] == "not_sent" and birth["meta"]["request_sent"] is False
     assert "no NDEATH will was registered" in birth["error"]
     assert not any("/NBIRTH/" in topic for topic in handed)
+
+
+SPARKPLUG_MODES = {
+    "NBIRTH": {},
+    "NDEATH": {},
+    "DBIRTH": {"device_id": "d", "metrics": []},
+    "DDEATH": {"device_id": "d"},
+    "NDATA": {"metrics": METRIC},
+    "DDATA": {"device_id": "d", "metrics": METRIC},
+    "NCMD": {"edge_node_id": "n", "metrics": METRIC},
+    "DCMD": {"edge_node_id": "n", "device_id": "d", "metrics": METRIC},
+}
+
+
+async def test_publish_sparkplug_is_gated_in_every_mode():
+    async with server() as session:
+        for mode, arguments in SPARKPLUG_MODES.items():
+            result = await call(session, "publish_sparkplug", message_type=mode, **arguments)
+            assert result["success"] is False, mode
+            assert result["meta"]["code"] == "writes_disabled", mode
+            assert result["meta"]["outcome"] == "not_sent", mode
+
+
+async def test_failures_carry_codes_an_agent_can_branch_on():
+    async with server(MQTT_WRITES_ENABLED="true") as session:
+        offline = await call(
+            session,
+            "publish_sparkplug",
+            message_type="DCMD",
+            edge_node_id="n",
+            device_id="d",
+            # Datatype names as list_sparkplug_nodes shows them are accepted.
+            metrics=[{"name": "pump_speed", "value": 75, "type": "Int32"}],
+        )
+        assert offline["meta"]["code"] == "endpoint_offline", offline
+        unborn = await call(session, "publish_sparkplug", message_type="NDATA", metrics=METRIC)
+        assert unborn["meta"]["code"] == "not_born", unborn
+        bad_metric = await call(
+            session,
+            "publish_sparkplug",
+            message_type="NCMD",
+            edge_node_id="n",
+            metrics=[{"name": "m", "value": "on", "type": "boolean"}],
+        )
+        assert bad_metric["meta"]["code"] == "invalid_arguments", bad_metric
+        missing = await call(session, "unsubscribe_topic", topic="never/subscribed")
+        assert missing["meta"]["code"] == "not_subscribed"
+    async with server() as session:
+        shared = await call(session, "subscribe_topic", topic="$share/g/a/#")
+        assert shared["meta"]["code"] == "writes_disabled"
+        offline = await call(session, "subscribe_topic", topic="a/#")
+        assert offline["meta"]["code"] == "endpoint_offline"

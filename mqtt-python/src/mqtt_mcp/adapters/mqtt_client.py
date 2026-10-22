@@ -227,7 +227,8 @@ class MQTTClientManager:
                 f"{self.settings.broker_url}"
                 f"{detail}"
                 ". Nothing was sent; the server keeps retrying "
-                "the connection in the background."
+                "the connection in the background.",
+                code="endpoint_offline",
             )
 
     def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
@@ -380,7 +381,9 @@ class MQTTClientManager:
         assert self.client is not None
         codes = await self._await_ack(lambda: self.client.subscribe(topic, qos), "subscribe", topic)
         if not codes or codes[0].is_failure:
-            raise PublishError(f"the broker refused the subscription to {topic!r}")
+            raise PublishError(
+                f"the broker refused the subscription to {topic!r}", code="broker_refused"
+            )
         return int(codes[0].value)
 
     async def unsubscribe(self, topic: str) -> None:
@@ -415,13 +418,17 @@ class MQTTClientManager:
         with self._lock:
             if self.closing and (not shutdown):
                 raise PublishError(
-                    "the server is shutting down (the MCP client is gone); nothing was sent"
+                    "the server is shutting down (the MCP client is gone); nothing was sent",
+                    code="cancelled",
                 )
             if state is not None and state.cancel_requested():
                 cancelled = True
             else:
                 if state is not None and state.deadline_passed():
-                    raise PublishError("the call's deadline has passed; nothing was sent")
+                    raise PublishError(
+                        "the call's deadline has passed; nothing was sent",
+                        code="deadline_exceeded",
+                    )
                 generation = self.generation
                 info = self.client.publish(topic, payload, qos=qos, retain=retain)
                 self._inflight[info.mid] = _InFlight(info)
@@ -479,13 +486,15 @@ class MQTTClientManager:
         if withdrawn is True and (problem == "connection lost" or self.generation == generation):
             if problem == "connection lost":
                 raise PublishError(
-                    "the connection was lost before it was written; nothing was sent"
+                    "the connection was lost before it was written; nothing was sent",
+                    code="endpoint_offline",
                 )
             raise PublishError(
                 "it was not on the network by the call's deadline"
                 " ("
                 f"{problem}"
-                "); it was withdrawn and nothing was sent"
+                "); it was withdrawn and nothing was sent",
+                code="deadline_exceeded",
             )
         what = (
             "was not confirmed as written"
@@ -595,14 +604,16 @@ class MQTTClientManager:
         task.add_done_callback(lambda t: t.cancelled() or t.exception())
         await asyncio.wait({task})
         if task.cancelled():
-            raise PublishError("the session restart was cancelled")
+            raise PublishError("the session restart was cancelled", code="cancelled")
         if task.exception() is not None:
             raise task.exception()
 
     async def _restart(self, bd_seq: int | None, state: SendState | None = None) -> None:
         assert self.client is not None
         if self.closing:
-            raise PublishError("the server is shutting down; the session was not restarted")
+            raise PublishError(
+                "the server is shutting down; the session was not restarted", code="cancelled"
+            )
         topic = sparkplug.topic(self.settings.group_id, "NDEATH", self.settings.edge_node_id)
         payload = None
         if bd_seq is not None:
@@ -612,7 +623,9 @@ class MQTTClientManager:
         await asyncio.to_thread(self._stop_network, True, max(self.time_left(), 1.0))
         with self._lock:
             if self.closing:
-                raise PublishError("the server is shutting down; the session was not restarted")
+                raise PublishError(
+                    "the server is shutting down; the session was not restarted", code="cancelled"
+                )
             cancelled = None
             if state is not None and payload is not None:
                 if state.cancel_requested():
@@ -635,14 +648,17 @@ class MQTTClientManager:
             )
             self.client.loop_start()
         if cancelled is not None:
-            raise PublishError(f"{cancelled}; no NDEATH will was registered")
+            raise PublishError(
+                f"{cancelled}; no NDEATH will was registered",
+                code="deadline_exceeded" if "deadline" in cancelled else "cancelled",
+            )
         wanted = (
             (lambda: self.connected and self.will_active) if payload else lambda: self.connected
         )
         if not await self.wait_for(wanted, self.time_left()):
             reason = self.last_refusal or self.current_error() or "timeout"
             what = "with the NDEATH will registered" if payload else "without a will"
-            raise PublishError(f"could not reconnect {what} ({reason})")
+            raise PublishError(f"could not reconnect {what} ({reason})", code="endpoint_offline")
 
     def sparkplug_state(self) -> dict[str, Any]:
         return {
