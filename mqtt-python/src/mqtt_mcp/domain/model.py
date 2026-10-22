@@ -15,7 +15,14 @@ def _fail(error: str, **meta: Any) -> dict[str, Any]:
 
 
 class ToolInputError(ValueError):
-    """An argument is invalid; reported as success:false."""
+    """An argument is invalid, or the call does not fit the current state.
+
+    Reported as success:false with ``meta.code`` (one of the contract's ``errors``).
+    """
+
+    def __init__(self, message: str, code: str = "invalid_arguments"):
+        super().__init__(message)
+        self.code = code
 
 
 def _check_qos(qos: Any) -> int:
@@ -104,10 +111,22 @@ UNKNOWN_HINT = "It may have been applied; check before retrying."
 class PublishError(RuntimeError):
     """A request did not complete; ``outcome`` says whether it may have gone out."""
 
-    def __init__(self, message: str, outcome: str = "not_sent", request_sent: bool = False):
+    def __init__(
+        self,
+        message: str,
+        outcome: str = "not_sent",
+        request_sent: bool = False,
+        code: str | None = None,
+    ):
         super().__init__(message)
         self.outcome = outcome
         self.request_sent = request_sent
+        self.code = code or ("outcome_unknown" if outcome == "unknown" else "send_failed")
+
+
+def error_code(exc: Exception) -> str:
+    """The contract error code for a failure (``invalid_arguments`` unless it says)."""
+    return getattr(exc, "code", "invalid_arguments")
 
 
 WRITE_TOOLS = frozenset(

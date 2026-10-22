@@ -15,6 +15,7 @@ from ..domain.model import (
     _check_unique_names,
     _fail,
     _ok,
+    error_code,
 )
 from ..domain.ports import MQTTSessionPort
 from ..infrastructure.control_context import _send_state
@@ -22,7 +23,13 @@ from ..infrastructure.control_context import _send_state
 
 def _writes_disabled(m: Any) -> dict[str, Any] | None:
     if not m.settings.writes_enabled:
-        return _fail(WRITES_DISABLED, writes_enabled=False, outcome="not_sent", request_sent=False)
+        return _fail(
+            WRITES_DISABLED,
+            code="writes_disabled",
+            writes_enabled=False,
+            outcome="not_sent",
+            request_sent=False,
+        )
     return None
 
 
@@ -38,7 +45,13 @@ def _write_failure(what: str, exc: Exception, **meta: Any) -> dict[str, Any]:
         outcome, request_sent = (exc.outcome, exc.request_sent)
     else:
         outcome, request_sent = ("not_sent", False)
-    return _fail(f"{what}: {exc}", outcome=outcome, request_sent=request_sent, **meta)
+    return _fail(
+        f"{what}: {exc}",
+        code=error_code(exc),
+        outcome=outcome,
+        request_sent=request_sent,
+        **meta,
+    )
 
 
 async def publish_message(
@@ -84,7 +97,8 @@ async def _publish_edge(
         raise PublishError(
             "the edge node is not born on this connection (no"
             " NDEATH will is registered); publish_node_birth "
-            "first"
+            "first",
+            code="not_born",
         )
     seq = 0 if seq_mode == "zero" else (m.seq + 1) % 256
     payload = sparkplug.build_payload(metrics, seq=seq, extra_metrics=extra or [])
@@ -177,7 +191,9 @@ async def publish_node_death(ctx: MQTTSessionPort) -> dict[str, Any]:
     try:
         async with m.sparkplug_lock:
             if not m.node_born:
-                raise ToolInputError("this server's edge node is not born; nothing to kill")
+                raise ToolInputError(
+                    "this server's edge node is not born; nothing to kill", code="not_born"
+                )
             topic, payload = m._ndeath_message()
             bd_seq = m.bd_seq
             result = await m.publish(topic, payload, qos=1)
@@ -206,7 +222,9 @@ async def publish_device_birth(
         _check_unique_names(metrics)
         async with m.sparkplug_lock:
             if not m.node_born:
-                raise ToolInputError("publish_node_birth first: the edge node is not born")
+                raise ToolInputError(
+                    "publish_node_birth first: the edge node is not born", code="not_born"
+                )
             data = await _publish_edge(m, "DBIRTH", metrics, device_id)
             m.device_births[device_id] = {"born_at_seq": data["seq"]}
     except (ToolInputError, sparkplug.MetricError, PublishError) as exc:
@@ -223,7 +241,9 @@ async def publish_device_death(ctx: MQTTSessionPort, device_id: str) -> dict[str
         device_id = _check_id(device_id, "device_id")
         async with m.sparkplug_lock:
             if not m.node_born or device_id not in m.device_births:
-                raise ToolInputError(f"device {device_id!r} has no DBIRTH from this server")
+                raise ToolInputError(
+                    f"device {device_id!r} has no DBIRTH from this server", code="not_born"
+                )
             data = await _publish_edge(m, "DDEATH", [], device_id)
             m.device_births.pop(device_id, None)
     except (ToolInputError, PublishError) as exc:
@@ -241,7 +261,9 @@ async def publish_node_data(ctx: MQTTSessionPort, metrics: list[dict[str, Any]])
         sparkplug.build_payload(metrics, seq=0)
         async with m.sparkplug_lock:
             if not m.node_born:
-                raise ToolInputError("publish_node_birth first: the edge node is not born")
+                raise ToolInputError(
+                    "publish_node_birth first: the edge node is not born", code="not_born"
+                )
             data = await _publish_edge(m, "NDATA", metrics)
     except (ToolInputError, sparkplug.MetricError, PublishError) as exc:
         return _edge_failure("NDATA", exc)
@@ -264,7 +286,8 @@ async def publish_device_data(
                 raise ToolInputError(
                     "publish_device_birth first: device "
                     f"{device_id!r}"
-                    " has no DBIRTH from this server"
+                    " has no DBIRTH from this server",
+                    code="not_born",
                 )
             data = await _publish_edge(m, "DDATA", metrics, device_id)
     except (ToolInputError, sparkplug.MetricError, PublishError) as exc:

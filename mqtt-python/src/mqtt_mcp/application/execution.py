@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..domain.policy import Policy
+from ..domain.policy import Policy, Refusal
 from ..infrastructure.audit import Audit
 
 log = logging.getLogger(__name__)
@@ -49,17 +49,17 @@ class Execution:
 
     def admit(self, tool, operation, *, write, local):
         if self.policy.allowed_tools is not None and tool not in self.policy.allowed_tools:
-            raise ValueError("Tool denied by configured policy")
+            raise Refusal("Tool denied by configured policy")
         if (
             self.policy.allowed_operations is not None
             and operation not in self.policy.allowed_operations
         ):
-            raise ValueError("Operation denied by configured policy")
+            raise Refusal("Operation denied by configured policy")
         if write and self.policy.read_only:
-            raise ValueError("Write denied by read-only policy")
+            raise Refusal("Write denied by read-only policy")
         reserved = self.active >= self.policy.max_in_flight
         if reserved and (not local or write or self.reserved):
-            raise ValueError("Server is busy; maximum in-flight requests reached")
+            raise Refusal("Server is busy; maximum in-flight requests reached", "resource_limit")
         ticket = Ticket(uuid.uuid4().hex, tool, operation, write, reserved, time.monotonic())
         if write:
             self.audit.record(ticket, "intent", None)

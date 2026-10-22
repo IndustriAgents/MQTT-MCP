@@ -486,3 +486,71 @@ async def test_shutdown_publishes_ndeath_for_a_born_node(broker, observer, tmp_p
     # The MCP client closed the session: the server announced the node's death.
     death = await observer.wait_for(lambda m: m.topic == f"spBv1.0/{group}/NDEATH/mcp-node")
     assert metrics_of(decode_payload(death.payload)) == {"bdSeq": ("Int64", 0)}
+
+
+async def test_agent_flow_through_publish_sparkplug(broker, mock_node, observer, tmp_path):
+    """The advertised tool end to end: discover, command with the datatype the node
+    reported, confirm from its data, and run this server's own node lifecycle. The MCP
+    client checks every successful result against the tool's outputSchema."""
+    mock = mock_node()
+    group = mock.group_id
+    observer.subscribe(f"spBv1.0/{group}/#")
+    async with mcp_session(
+        tmp_path,
+        MQTT_BROKER_URL=broker.url,
+        MQTT_WRITES_ENABLED="true",
+        SPARKPLUG_GROUP_ID=group,
+        SPARKPLUG_EDGE_NODE_ID="mcp-agent",
+    ) as session:
+        await eventually(
+            lambda: _connected(session),
+        )
+        await call(session, "subscribe_topic", topic=f"spBv1.0/{group}/#")
+
+        async def pump_metric():
+            for node in (await call(session, "list_sparkplug_nodes"))["data"]["nodes"]:
+                for device in node["devices"]:
+                    if device["device_id"] == "device-2" and "pump_speed" in device["metrics"]:
+                        return device["metrics"]["pump_speed"]
+            return None
+
+        pump = await eventually(pump_metric)
+        command = await call(
+            session,
+            "publish_sparkplug",
+            message_type="DCMD",
+            edge_node_id="edge-node-1",
+            device_id="device-2",
+            metrics=[{"name": "pump_speed", "value": 42, "type": pump["datatype"]}],
+        )
+        assert command["success"] is True and command["meta"]["outcome"] == "written"
+
+        async def applied():
+            value = await pump_metric()
+            return value if value and value["value"] == 42 else None
+
+        await eventually(applied)
+
+        own = [
+            ("NBIRTH", {"metrics": [{"name": "uptime", "value": 0, "type": "int64"}]}),
+            (
+                "DBIRTH",
+                {"device_id": "probe", "metrics": [{"name": "t", "value": 1.5, "type": "Double"}]},
+            ),
+            (
+                "DDATA",
+                {"device_id": "probe", "metrics": [{"name": "t", "value": 2.5, "type": "double"}]},
+            ),
+            ("DDEATH", {"device_id": "probe"}),
+            ("NDEATH", {}),
+        ]
+        for mode, arguments in own:
+            result = await call(session, "publish_sparkplug", message_type=mode, **arguments)
+            assert result["success"] is True, (mode, result)
+            assert f"/{mode}/mcp-agent" in result["data"]["topic"], mode
+        await observer.wait_for(lambda m: m.topic == f"spBv1.0/{group}/NDEATH/mcp-agent")
+
+
+async def _connected(session):
+    info = await call(session, "get_broker_info")
+    return info if info["data"]["connected"] else None

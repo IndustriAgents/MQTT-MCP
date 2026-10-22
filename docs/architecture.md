@@ -56,11 +56,15 @@ TypeScript implementation: npm carries the same wheel as the PyPI release.
 | `publish_message` | No mode selector | Changes state or consumes events |
 
 A mode selects one protocol operation. Parameters from different modes cannot
-be mixed; unknown parameters fail before dispatch. Alias/tag modes resolve
-through the existing configured map and preserve its scaling and validation.
-Legacy names remain callable but are omitted from `tools/list`. Names retained
-in both catalogs accept the old address form without the new selector for
-migration. Those legacy forms retain native argument validation and coercion.
+be mixed; unknown parameters fail before dispatch. Every advertised tool is
+held to its contract `inputSchema` before dispatch; a mode is checked against
+its own `oneOf` variant, so a refusal names the argument and what it must be
+(`edge_node_id is required`, `qos must be 0, 1 or 2`) without echoing values.
+The schemas state types, required arguments, enums, numeric bounds and list
+sizes; topic and ID syntax and metric values stay with the native checks,
+which word those failures precisely. Metric `type` stays case-insensitive.
+Legacy names remain callable but are omitted from `tools/list`. Those legacy
+names retain native argument validation and coercion.
 
 | Legacy name | Advertised replacement |
 |---|---|
@@ -79,6 +83,15 @@ result. Writes preserve `meta.outcome` and `meta.request_sent` from the native
 adapter. A timeout/cancellation after possible dispatch is uncertain, never
 converted to not_sent. There is no new generic retry loop. In particular,
 retrying an unknown control outcome can apply a physical action twice.
+
+Each tool's `outputSchema` embeds the shape of its `data` (`resultShapes`,
+named per tool in `routes -> resultShape`) and the meta fields it reports.
+Shapes list the fields a result always or may carry; clients should ignore
+fields they do not know. A failed result always carries `meta.code`, one of
+the contract's `errors`, each with what it means and what to do; clients
+branch on the code, never on the wording of `error`. The test suite checks
+every result it produces, failures included, against the advertised
+`outputSchema`.
 
 ## Deployment policy and audit
 
