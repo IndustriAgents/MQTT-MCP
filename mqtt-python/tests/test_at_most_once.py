@@ -5,6 +5,7 @@ restart). Needs a broker; every test watches the broker with an observer."""
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import anyio
@@ -339,18 +340,33 @@ async def test_calls_whose_connection_arrives_after_their_deadline_send_nothing(
         proxy = proxy_factory().start()
         proxy.pause_downstream = True  # the CONNECT gets through, the CONNACK waits
         srv = raw_server(
+            trace_deadlines=True,
             MQTT_BROKER_URL=f"mqtt://127.0.0.1:{proxy.port}",
             MQTT_WRITES_ENABLED="true",
             MQTT_TOOL_TIMEOUT=str(deadline),
         )
-        started = time.monotonic()
         calls = [
             srv.call_async(
                 "publish_message", topic=f"itest-once/{tag}/late{i}", payload="late", qos=i % 2
             )
             for i in range(20)
         ]
-        while time.monotonic() < started + deadline + 0.02:
+        # Measure the actual deadlines after all server tasks have entered the
+        # tool wrapper. Client enqueue time is earlier and is not an admission
+        # barrier: under load the twentieth request can start >20 ms later.
+        admitted = []
+        admission_timeout = time.monotonic() + 10
+        while len(admitted) != len(calls) and time.monotonic() < admission_timeout:
+            if srv.deadlines_path.exists():
+                lines = srv.deadlines_path.read_text().split("\n")[:-1]
+                admitted = [json.loads(line) for line in lines]
+            await asyncio.sleep(0.001)
+        assert len(admitted) == len(calls), srv.stderr()
+        assert {entry["topic"] for entry in admitted} == {
+            f"itest-once/{tag}/late{i}" for i in range(20)
+        }
+        latest_deadline = max(entry["deadline"] for entry in admitted)
+        while time.monotonic() < latest_deadline + 0.02:
             await asyncio.sleep(0.0005)
         proxy.pause_downstream = False  # connected, 20 ms after the deadline
         outcomes = []

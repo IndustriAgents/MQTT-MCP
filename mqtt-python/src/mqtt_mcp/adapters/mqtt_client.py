@@ -352,21 +352,37 @@ class MQTTClientManager:
         """Run a paho subscribe/unsubscribe call and wait for the broker's ack."""
         assert self._loop is not None
         future = self._loop.create_future()
+        state = _send_state.get()
+        cancelled = False
         with self._lock:
-            result, mid = call()
-            if result != mqtt.MQTT_ERR_SUCCESS or mid is None:
-                raise PublishError(f"the {kind} was not sent: {mqtt.error_string(result)}")
-            self._pending[mid] = (future, kind, topic)
+            if self.closing:
+                raise PublishError("the server is shutting down; nothing was sent")
+            if state is not None and state.cancel_requested():
+                cancelled = True
+            else:
+                if state is not None and state.deadline_passed():
+                    raise PublishError("the call's deadline has passed; nothing was sent")
+                result, mid = call()
+                if result != mqtt.MQTT_ERR_SUCCESS or mid is None:
+                    raise PublishError(f"the {kind} was not sent: {mqtt.error_string(result)}")
+                self._pending[mid] = (future, kind, topic)
+        if cancelled:
+            await _end_as_cancelled(f"The {kind} was cancelled; nothing was sent")
         try:
             reason_codes = await asyncio.wait_for(future, self.time_left())
         except asyncio.TimeoutError:
-            with self._lock:
-                self._pending.pop(mid, None)
             raise PublishError(
                 f"the broker did not acknowledge the {kind} before the call's deadline",
                 outcome="unknown",
                 request_sent=True,
             ) from None
+        finally:
+            # Cancellation is just as final as a timeout for this waiter. Do not
+            # retain cancelled futures indefinitely when the broker never acks.
+            with self._lock:
+                pending = self._pending.get(mid)
+                if pending is not None and pending[0] is future:
+                    self._pending.pop(mid)
         if reason_codes is None:
             raise PublishError(
                 f"the connection was lost before the broker acknowledged the {kind}",

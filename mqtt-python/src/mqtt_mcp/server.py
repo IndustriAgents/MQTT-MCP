@@ -12,6 +12,7 @@ from .application.diagnostics import decode_sparkplug_payload as decode_sparkplu
 from .application.diagnostics import get_broker_info as get_broker_info
 from .application.diagnostics import list_sparkplug_nodes as list_sparkplug_nodes
 from .application.diagnostics import list_subscriptions as list_subscriptions
+from .application.execution import Execution
 from .application.read import read_messages as read_messages
 from .application.read import subscribe_topic as subscribe_topic
 from .application.read import unsubscribe_topic as unsubscribe_topic
@@ -87,6 +88,9 @@ def main(env_file: str | None = None) -> None:
     try:
         settings = get_settings(env_file)
         build_client(settings)
+        # The module-level compatibility server predates --env-file. Resolve its
+        # policy only after the same environment merge used by connection settings.
+        mcp.contract_boundary.execution = Execution.from_environment("mqtt")
     except (ConfigError, OSError, ValueError) as exc:
         print(f"mqtt-mcp: configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None

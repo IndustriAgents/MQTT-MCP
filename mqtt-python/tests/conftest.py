@@ -479,11 +479,19 @@ class RawServer:
     calls are still running, which the mcp client SDK does not expose.
     """
 
-    def __init__(self, tmp_path: Path, **env: str) -> None:
+    def __init__(self, tmp_path: Path, *, trace_deadlines: bool = False, **env: str) -> None:
+        self.deadlines_path = tmp_path / f"deadlines-{uuid.uuid4().hex[:6]}.jsonl"
+        command = [str(SERVER_EXE)]
+        if trace_deadlines:
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("deadline_server.py")),
+                str(self.deadlines_path),
+            ]
         self.stderr_path = tmp_path / f"raw-server-{uuid.uuid4().hex[:6]}.err"
         self._errfile = open(self.stderr_path, "w")
         self.proc = subprocess.Popen(
-            [str(SERVER_EXE)],
+            command,
             cwd=tmp_path,
             env=server_env(**env),
             stdin=subprocess.PIPE,
@@ -586,8 +594,8 @@ class RawServer:
 def raw_server(tmp_path):
     started: list[RawServer] = []
 
-    def start(**env: str) -> RawServer:
-        server = RawServer(tmp_path, **env)
+    def start(*, trace_deadlines: bool = False, **env: str) -> RawServer:
+        server = RawServer(tmp_path, trace_deadlines=trace_deadlines, **env)
         started.append(server)
         return server
 

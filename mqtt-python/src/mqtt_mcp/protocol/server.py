@@ -6,7 +6,6 @@ from typing import Any
 import anyio
 import anyio.lowlevel
 from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 
 from ..config import Settings
@@ -172,19 +171,18 @@ class EnvelopeFastMCP(FastMCP):
         )
 
     async def _call_enveloped(self, name: str, arguments: dict[str, Any]):
-        try:
-            return await super().call_tool(name, arguments)
-        except ToolError as exc:
-            cause = exc.__cause__
-            if isinstance(cause, ValidationError):
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            metadata = tool.fn_metadata
+            try:
+                metadata.arg_model.model_validate(metadata.pre_parse_json(arguments or {}))
+            except ValidationError as exc:
                 problems = "; ".join(
                     f"{'.'.join(str(p) for p in err['loc']) or 'arguments'}: {err['msg']}"
-                    for err in cause.errors()
+                    for err in exc.errors()
                 )
-                return _fail(f"Invalid arguments: {problems}", tool=name)
-            if cause is not None:
-                logger.exception("Tool %s failed", name, exc_info=cause)
-                return _fail(
-                    f"Internal error in {name}: {type(cause).__name__}: {cause}", tool=name
-                )
-            raise
+                meta = {"outcome": "not_sent", "request_sent": False} if name in WRITE_TOOLS else {}
+                return _fail(f"Invalid arguments: {problems}", tool=name, **meta)
+        # Errors raised by a running handler, including ValidationError, do not
+        # prove that a publication was never sent. The contract preserves that.
+        return await super().call_tool(name, arguments)

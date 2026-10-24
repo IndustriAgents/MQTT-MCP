@@ -325,3 +325,43 @@ def test_implicit_env_file_location(tmp_path, monkeypatch):
     # Some other project's src/ layout does not count.
     (project / "pyproject.toml").write_text('[project]\nname = "other"\n')
     assert config.implicit_env_file() is None
+
+
+@pytest.mark.parametrize("environment_override", [False, True])
+def test_cli_resolves_policy_after_explicit_env_file(tmp_path, monkeypatch, environment_override):
+    policy = tmp_path / "deny.json"
+    policy.write_text('{"allowed_tools": []}')
+    settings = tmp_path / "settings.env"
+    settings.write_text(f"MQTT_POLICY_FILE={policy}\n")
+    monkeypatch.delenv("MQTT_POLICY_FILE", raising=False)
+    if environment_override:
+        override = tmp_path / "override.json"
+        override.write_text('{"read_only": true}')
+        monkeypatch.setenv("MQTT_POLICY_FILE", str(override))
+    boundary = mqtt_server.mcp.contract_boundary
+    monkeypatch.setattr(boundary, "execution", boundary.execution)
+    seen = []
+    monkeypatch.setattr(
+        mqtt_server.mcp, "run", lambda **kwargs: seen.append(boundary.execution.policy)
+    )
+    mqtt_server.main(env_file=str(settings))
+    assert len(seen) == 1
+    assert seen[0].allowed_tools == (None if environment_override else ())
+    assert seen[0].read_only is environment_override
+
+
+def test_cli_invalid_explicit_policy_fails_before_serving(tmp_path, monkeypatch, capsys):
+    policy = tmp_path / "invalid.json"
+    policy.write_text('{"read_only": "false"}')
+    settings = tmp_path / "settings.env"
+    settings.write_text(f"MQTT_POLICY_FILE={policy}\n")
+    monkeypatch.delenv("MQTT_POLICY_FILE", raising=False)
+    served = []
+    monkeypatch.setattr(mqtt_server.mcp, "run", lambda **kwargs: served.append(True))
+    with pytest.raises(SystemExit) as caught:
+        mqtt_server.main(env_file=str(settings))
+    assert caught.value.code == 2
+    assert served == []
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "configuration error" in output.err
