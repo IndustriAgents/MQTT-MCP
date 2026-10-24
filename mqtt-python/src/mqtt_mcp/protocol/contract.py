@@ -8,12 +8,71 @@ from importlib.resources import files
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import best_match
 from mcp.types import CallToolResult, TextContent, Tool
 
 from ..application.execution import Execution
 from .request_limits import RequestError, validate_request
 
 log = logging.getLogger(__name__)
+
+_KINDS = {
+    "array": "a list",
+    "boolean": "true or false",
+    "integer": "an integer",
+    "null": "null",
+    "number": "a number",
+    "object": "an object",
+    "string": "a string",
+}
+
+
+def _choices(values) -> str:
+    """'a', 'a or b', 'a, b or c'."""
+    words = [v if isinstance(v, str) else json.dumps(v) for v in values]
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
+
+
+def _where(error) -> str:
+    path = ""
+    for part in error.absolute_path:
+        path += f"[{part}]" if isinstance(part, int) else (f".{part}" if path else str(part))
+    return path
+
+
+def describe(error) -> str:
+    """Say what a schema violation means, naming the argument but never its value
+    (values may contain credentials or payloads)."""
+    where, kind, expected = _where(error), error.validator, error.validator_value
+    if kind == "required":
+        missing = [f"{where}.{k}" if where else k for k in expected if k not in error.instance]
+        return f"{', '.join(missing)} {'is' if len(missing) == 1 else 'are'} required"
+    if kind == "additionalProperties":
+        allowed = sorted(error.schema.get("properties", {}))
+        unknown = sorted(set(error.instance) - set(allowed))
+        scope = f" in {where}" if where else ""
+        return (
+            f"unknown argument(s){scope}: {', '.join(unknown)}; "
+            f"accepted: {', '.join(allowed) or 'none'}"
+        )
+    where = where or "arguments"
+    if kind == "type":
+        kinds = expected if isinstance(expected, list) else [expected]
+        return f"{where} must be {_choices([_KINDS.get(k, k) for k in kinds])}"
+    if kind in ("enum", "const"):
+        return f"{where} must be {_choices(expected if kind == 'enum' else [expected])}"
+    bounds = {
+        "minimum": "at least {}",
+        "maximum": "at most {}",
+        "minItems": "a list of at least {} item(s)",
+        "maxItems": "a list of at most {} item(s)",
+        "minLength": "a string of at least {} character(s)",
+    }
+    if kind == "minLength" and expected == 1:
+        return f"{where} must be a non-empty string"
+    if kind in bounds:
+        return f"{where} must be {bounds[kind].format(expected)}"
+    return f"{where} does not match the documented shape ({kind})"
 
 
 def envelope_of(result: Any) -> dict[str, Any] | None:
@@ -47,6 +106,12 @@ class ContractBoundary:
         self.original_call = server.call_tool
         self.tools = {t["name"]: t for t in self.contract["tools"]}
         self.validators = {n: Draft202012Validator(t["inputSchema"]) for n, t in self.tools.items()}
+        self.mode_validators = {
+            (name, variant["properties"][route["selector"]]["const"]): Draft202012Validator(variant)
+            for name, route in self.contract["routes"].items()
+            if "selector" in route
+            for variant in self.tools[name]["inputSchema"]["oneOf"]
+        }
         self.legacy_validators = {
             n: Draft202012Validator(s) for n, s in self.contract["legacySchemas"].items()
         }
@@ -77,17 +142,21 @@ class ContractBoundary:
         handler, forwarded = name, arguments
         legacy_call = route is None
         validator = self.legacy_validators.get(name)
+        problem = None
         if route:
             canonical = name
             validator = self.validators[name]
             if "selector" in route:
                 selector = route["selector"]
                 if isinstance(arguments, dict) and selector in arguments:
-                    handler = (
-                        route["options"].get(arguments[selector])
-                        if isinstance(arguments[selector], str)
-                        else None
-                    )
+                    mode = arguments[selector]
+                    handler = route["options"].get(mode) if isinstance(mode, str) else None
+                    if handler is None:
+                        problem = f"{selector} must be {_choices(route['options'])}"
+                    else:
+                        # The selected mode's own schema names the exact problem;
+                        # the combined oneOf could only say that nothing matched.
+                        validator = self.mode_validators[(name, mode)]
                     forwarded = {k: v for k, v in arguments.items() if k != selector}
                 elif "legacyHandler" in route:
                     legacy_call = True
@@ -95,49 +164,31 @@ class ContractBoundary:
                     validator = self.legacy_validators[handler]
                 else:
                     handler = None
+                    problem = f"{selector} is required and must be {_choices(route['options'])}"
             else:
-                legacy_call = True
                 handler = route["handler"]
         if validator is None:
             from mcp.server.fastmcp.exceptions import ToolError
 
             raise ToolError(f"Unknown tool: {name}")
-        # Legacy signatures keep their documented native coercion. Unknown keys
-        # must still fail before SDK models can silently discard a typo.
+        # Legacy aliases retain native coercion, but unknown keys must not be
+        # silently discarded by the SDK before dispatch.
         if legacy_call and set(arguments) - set(validator.schema.get("properties", {})):
             return self.refusal(name, "Unknown argument(s) for legacy tool")
-        error = None if legacy_call else next(validator.iter_errors(arguments), None)
-        if error is not None or handler is None:
-            # Do not echo argument values: they may contain credentials or payloads.
-            path = ".".join(map(str, error.absolute_path)) if error else ""
-            if error and error.validator == "additionalProperties":
-                path = "Unknown argument(s): " + ", ".join(
-                    sorted(set(arguments) - set(error.schema.get("properties", {})))
-                )
-            if error and error.validator == "required":
-                path = ", ".join(k for k in error.validator_value if k not in arguments)
-            expected = (
-                error.validator_value if error and error.validator == "type" else "documented shape"
-            )
-            return self.refusal(
-                name,
-                (
-                    "Invalid arguments: "
-                    f"{path or 'arguments'}"
-                    ": "
-                    f"{(error.validator if error else 'selector')}"
-                    " constraint failed (expected "
-                    f"{expected}"
-                    ")"
-                ),
-            )
+        if problem is None and not legacy_call:
+            error = best_match(validator.iter_errors(arguments))
+            problem = None if error is None else describe(error)
+        if problem is not None:
+            return self.refusal(name, f"Invalid arguments: {problem}")
         definition = self.tools[canonical]
         write = not definition.get("annotations", {}).get("readOnlyHint", False)
         local = canonical in self.contract["localStatusTools"]
         try:
             ticket = self.execution.admit(canonical, handler, write=write, local=local)
         except (ValueError, OSError) as exc:
-            return self.refusal(name, str(exc), "policy_denied")
+            # An audit intent that cannot be persisted refuses the call (OSError).
+            code = getattr(exc, "code", "audit_unavailable")
+            return self.refusal(name, str(exc), code)
         result = None
         try:
             result = await self.original_call(handler, forwarded)

@@ -52,16 +52,21 @@ def list_sparkplug_nodes(ctx: MQTTSessionPort) -> dict[str, Any]:
 def decode_sparkplug_payload(payload_hex: str) -> dict[str, Any]:
     """Decode a hex-encoded Sparkplug B protobuf payload (as read_messages shows it)."""
     if not isinstance(payload_hex, str):
-        return _fail("payload_hex must be a string of hex digits")
+        return _fail("payload_hex must be a string of hex digits", code="invalid_arguments")
     cleaned = "".join(payload_hex.split())
     if cleaned[:2].lower() == "0x":
         cleaned = cleaned[2:]
     try:
         data = bytes.fromhex(cleaned)
     except ValueError:
-        return _fail("payload_hex is not valid hex (expected pairs of 0-9a-f digits)")
+        return _fail(
+            "payload_hex is not valid hex (expected pairs of 0-9a-f digits)",
+            code="invalid_arguments",
+        )
     try:
         decoded = sparkplug.decode_payload(data)
     except Exception as exc:
-        return _fail(f"Not a valid Sparkplug B payload: {exc}", size=len(data))
+        return _fail(
+            f"Not a valid Sparkplug B payload: {exc}", code="invalid_arguments", size=len(data)
+        )
     return _ok(decoded, size=len(data))

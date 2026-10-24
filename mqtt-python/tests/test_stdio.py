@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 
-from .conftest import SERVER_EXE, free_port, server_env
+from .conftest import SERVER_EXE, check_envelope, free_port, server_env
 from .test_sparkplug import README_SAMPLE_HEX
 
 METRIC = [{"name": "m", "value": -1, "type": "int32"}]
@@ -30,6 +30,12 @@ EVERY_TOOL = {
     "publish_device_data": {"device_id": "d", "metrics": METRIC},
     "publish_node_command": {"edge_node_id": "n", "metrics": METRIC},
     "publish_device_command": {"edge_node_id": "n", "device_id": "d", "metrics": METRIC},
+    "publish_sparkplug": {
+        "message_type": "DCMD",
+        "edge_node_id": "n",
+        "device_id": "d",
+        "metrics": METRIC,
+    },
 }
 
 STRAY_PRINT = (
@@ -196,6 +202,7 @@ def test_stdout_carries_only_json_rpc(tmp_path):
     for number, name in enumerate(EVERY_TOOL, start=3):
         envelope = responses[number]["result"]["structuredContent"]
         assert set(envelope) == {"success", "data", "error", "meta"}, name
+        check_envelope(name, envelope)
     info = responses[3]["result"]["structuredContent"]
     assert info["data"]["connected"] is False and info["data"]["username"] == "agent"
     assert "Connecting to" in stderr  # logs go to stderr

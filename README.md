@@ -166,6 +166,8 @@ Every tool returns the suite's envelope:
 
 On failure `success` is `false`, `data` is `null` and `error` says what went wrong, including invalid arguments (arguments are type-checked strictly: `true` is not accepted as a number, nor `1` as a boolean).
 
+Every failure also carries a stable `meta.code` to branch on instead of the wording of `error`; [`contract/tools.json`](contract/tools.json) -> `errors` says what each one means and what to do. The ones an agent meets most: `invalid_arguments` (fix the call), `writes_disabled` (the server is read-only; do not retry), `endpoint_offline` (the broker is unreachable; nothing was sent), `not_born` (publish NBIRTH/DBIRTH first), `not_subscribed`, `deadline_exceeded`, and `outcome_unknown` (it may have been sent; check before retrying). Each tool's `outputSchema` describes its `data`.
+
 Write tools also report what is known about the request in `meta.outcome` and `meta.request_sent`:
 
 | `meta.outcome` | `success` | Meaning |

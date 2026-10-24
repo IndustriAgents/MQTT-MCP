@@ -2,7 +2,15 @@ from typing import Any
 
 from pydantic import StrictInt
 
-from ..domain.model import PublishError, ToolInputError, _check_qos, _check_topic_filter, _fail, _ok
+from ..domain.model import (
+    PublishError,
+    ToolInputError,
+    _check_qos,
+    _check_topic_filter,
+    _fail,
+    _ok,
+    error_code,
+)
 from ..domain.ports import MQTTSessionPort
 
 
@@ -23,11 +31,12 @@ async def subscribe_topic(ctx: MQTTSessionPort, topic: str, qos: StrictInt = 0) 
                 "$queue/) or exclusive ($exclusive/) "
                 "subscriptions that change what other clients "
                 "receive; they are only allowed with "
-                "MQTT_WRITES_ENABLED=true"
+                "MQTT_WRITES_ENABLED=true",
+                code="writes_disabled",
             )
         granted = await m.subscribe(topic, qos)
     except (ToolInputError, PublishError) as exc:
-        return _fail(f"Could not subscribe to {topic!r}: {exc}", topic=topic)
+        return _fail(f"Could not subscribe to {topic!r}: {exc}", code=error_code(exc), topic=topic)
     return _ok({"topic": topic, "granted_qos": granted}, requested_qos=qos)
 
 
@@ -42,11 +51,14 @@ async def unsubscribe_topic(ctx: MQTTSessionPort, topic: str) -> dict[str, Any]:
                 f"{topic!r}"
                 " (current: "
                 f"{sorted(m.subscriptions) or 'none'}"
-                ")"
+                ")",
+                code="not_subscribed",
             )
         await m.unsubscribe(topic)
     except (ToolInputError, PublishError) as exc:
-        return _fail(f"Could not unsubscribe from {topic!r}: {exc}", topic=topic)
+        return _fail(
+            f"Could not unsubscribe from {topic!r}: {exc}", code=error_code(exc), topic=topic
+        )
     return _ok({"topic": topic, "unsubscribed": True})
 
 
@@ -68,7 +80,7 @@ def read_messages(
         ):
             raise ToolInputError(f"since_id must be a non-negative integer, got {since_id!r}")
     except ToolInputError as exc:
-        return _fail(str(exc))
+        return _fail(str(exc), code=exc.code)
     messages, meta = m.messages.query(topic_filter, limit, since_id)
     if not m.subscriptions and (not messages):
         meta["note"] = "This server holds no subscriptions; call subscribe_topic first."

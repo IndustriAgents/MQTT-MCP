@@ -30,6 +30,7 @@ from typing import Any
 
 import paho.mqtt.client as mqtt
 import pytest
+from jsonschema import Draft202012Validator
 
 from mqtt_mcp.config import parse_broker_url
 
@@ -40,6 +41,17 @@ MOCK_SCRIPT = MOCK_DIR / "mqtt_mock_server.py"
 BIN = Path(sys.executable).parent
 SERVER_EXE = BIN / "mqtt-mcp"
 WATCHDOG = Path(__file__).resolve().parent / "watchdog.py"
+
+CONTRACT = json.loads((REPO / "contract/tools.json").read_text())
+_OUTPUT_VALIDATORS = {t["name"]: Draft202012Validator(t["outputSchema"]) for t in CONTRACT["tools"]}
+
+
+def check_envelope(name: str, envelope: dict[str, Any]) -> None:
+    """Every result, failures included, must match its tool's advertised outputSchema
+    (a legacy name answers with the shape of the tool it maps to). This is also what
+    holds every failure to a documented meta.code."""
+    _OUTPUT_VALIDATORS[CONTRACT["legacy"].get(name, name)].validate(envelope)
+
 
 #: Every variable the server reads; tests set all of them so that a stray .env
 #: file can never change what is under test (.env values never override set variables).
@@ -457,6 +469,7 @@ async def call(session, name: str, **arguments: Any) -> dict[str, Any]:
     if envelope is None:
         envelope = json.loads(result.content[0].text)
     assert set(envelope) == {"success", "data", "error", "meta"}, envelope
+    check_envelope(name, envelope)
     return envelope
 
 

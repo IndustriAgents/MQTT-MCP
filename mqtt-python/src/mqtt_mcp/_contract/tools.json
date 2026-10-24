@@ -5,98 +5,79 @@
   "tools": [
     {
       "name": "publish_sparkplug",
-      "description": "Select one message_type mode and provide only its parameters.\n\nNBIRTH: WRITE: make this server a Sparkplug B edge node and publish its NBIRTH.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nThe node is SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID (see get_broker_info);\nit must not be the ID of a real edge node. If no NDEATH will is registered\non the current connection yet, the server first reconnects with an NDEATH\nLast Will carrying a new bdSeq, so the broker announces the node's death if\nthe server disappears. The NBIRTH has seq 0 and automatically includes the\n'bdSeq' and 'Node Control/Rebirth' (false) metrics. Publishing NBIRTH again\nis a rebirth: devices must then be born again. The server does not act on\ncommands (including rebirth requests) sent to its own node. After an\nunexpected disconnect the node is dead and needs a new NBIRTH.\n\nParameters:\n    metrics: the node's metrics (optional). A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\ndata: topic, seq, bd_seq, metric count and delivery (QoS 0, as the\nspecification requires for NBIRTH).\n\n\nNDEATH: WRITE: publish this server's NDEATH (edge node goes offline).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nOnly possible after publish_node_birth. The payload carries the bdSeq of the\nNBIRTH and no seq, as the specification requires; it is sent with QoS 1 and\nconfirmed by the broker. All of the node's devices count as dead afterwards.\nThe server then reconnects without the NDEATH will, so that the broker does\nnot announce the death a second time; the next NBIRTH uses a new bdSeq.\n\n\nDBIRTH: WRITE: publish a DBIRTH for a device of this server's edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a born node (publish_node_birth first). Uses the node's next seq.\n\nParameters:\n    device_id: device ID (no '+', '/' or '#').\n    metrics: all metrics of the device (may be empty). A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nDDEATH: WRITE: publish a DDEATH for a device born with publish_device_birth.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nParameters:\n    device_id: a device this server has published a DBIRTH for.\n\n\nNDATA: WRITE: publish NDATA (new values of this server's node metrics).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a born node (publish_node_birth first). Uses the node's next seq.\n\nParameters:\n    metrics: at least one metric. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nDDATA: WRITE: publish DDATA (new values of a device born by this server).\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nNeeds a DBIRTH for the device (publish_device_birth). Uses the node's next seq.\n\nParameters:\n    device_id: a device this server has published a DBIRTH for.\n    metrics: at least one metric. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n\n\nNCMD: WRITE: send a Sparkplug B NCMD to an edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nA command can change real equipment: the edge node applies the metrics it\nreceives. It is sent at most once. success:true (meta.outcome \"written\") only\nmeans the NCMD was written to the network (QoS 0, as the specification\nrequires); it does not mean the node applied it. Watch its NDATA\n(read_messages) to confirm. meta.outcome \"unknown\" means it may have gone out:\ncheck before retrying. Example: {\"name\": \"Node Control/Rebirth\",\n\"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n\nParameters:\n    metrics: at least one metric to write. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n    edge_node_id: target edge node (required; there is no default target).\n    group_id: target group (default: SPARKPLUG_GROUP_ID).\n\n\nDCMD: WRITE: send a Sparkplug B DCMD to a device of an edge node.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nA command can change real equipment: the edge node applies the metrics to\nthe device. It is sent at most once. success:true (meta.outcome \"written\")\nonly means the DCMD was written to the network (QoS 0, as the specification\nrequires); it does not mean the device applied it. Watch its DDATA\n(read_messages) to confirm. meta.outcome \"unknown\" means it may have gone out:\ncheck before retrying.\n\nParameters:\n    device_id: target device ID.\n    metrics: at least one metric to write. A list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The value must match the type and fit its range; negative values are fine for the signed int types; null sends a null metric. An unknown type or a mismatching value is rejected with success:false, nothing is sent.\n    edge_node_id: edge node the device belongs to (required; no default target).\n    group_id: target group (default: SPARKPLUG_GROUP_ID).\n",
+      "description": "WRITE: publish a Sparkplug B message. Set message_type and give only the arguments of that mode.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAs this server's own edge node (SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID, see get_broker_info; never the ID of a real edge node):\n- NBIRTH (metrics?): make this server an edge node and publish its birth. The first NBIRTH reconnects with an NDEATH Last Will carrying a new bdSeq, so the broker announces the node's death if the server disappears. bdSeq and 'Node Control/Rebirth' are added for you; seq is 0. Publishing NBIRTH again is a rebirth: devices must then be born again. After an unexpected disconnect the node is dead and needs a new NBIRTH.\n- NDEATH: take the node offline (QoS 1, confirmed by the broker). Its devices count as dead; the next NBIRTH uses a new bdSeq.\n- DBIRTH (device_id, metrics): birth of a device of this node. Needs a born node.\n- DDEATH (device_id): death of a device born with DBIRTH.\n- NDATA (metrics): new values of the node's metrics. Needs a born node.\n- DDATA (device_id, metrics): new values of a device born with DBIRTH.\nThese use the node's next seq. The server does not act on commands sent to its own node.\n\nCommands to other edge nodes, which can change real equipment:\n- NCMD (edge_node_id, metrics, group_id?): e.g. {\"name\": \"Node Control/Rebirth\", \"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n- DCMD (edge_node_id, device_id, metrics, group_id?): the edge node applies the metrics to the device.\n\nSent at most once. success:true (meta.outcome 'written') means the message was written to the network (QoS 0, as the specification requires; NDEATH: acknowledged by the broker). For a command that does not mean the node applied it: read its next NDATA or DDATA with read_messages to confirm. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have gone out: the server never sends it again, so check before retrying.\n\nMetrics are a list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string), case-insensitive, so the datatype names list_sparkplug_nodes shows (Int32, Double, ...) work too. The value must match the type and fit its range; null sends a null metric. An invalid metric is refused before anything is sent.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "metrics": {
-            "anyOf": [
-              {
-                "anyOf": [
-                  {
-                    "items": {
-                      "additionalProperties": true,
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "title": "Metrics"
-              },
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
-              }
-            ],
-            "description": "metrics for the selected operation; see its mode description."
-          },
           "message_type": {
-            "anyOf": [
-              {
-                "const": "NBIRTH",
-                "type": "string"
-              },
-              {
-                "const": "NDEATH",
-                "type": "string"
-              },
-              {
-                "const": "DBIRTH",
-                "type": "string"
-              },
-              {
-                "const": "DDEATH",
-                "type": "string"
-              },
-              {
-                "const": "NDATA",
-                "type": "string"
-              },
-              {
-                "const": "DDATA",
-                "type": "string"
-              },
-              {
-                "const": "NCMD",
-                "type": "string"
-              },
-              {
-                "const": "DCMD",
-                "type": "string"
-              }
+            "type": "string",
+            "enum": [
+              "NBIRTH",
+              "NDEATH",
+              "DBIRTH",
+              "DDEATH",
+              "NDATA",
+              "DDATA",
+              "NCMD",
+              "DCMD"
             ],
-            "description": "Select the message_type mode described above."
+            "description": "The Sparkplug B message to publish; it decides which other arguments apply (see the tool description). NBIRTH, NDEATH, DBIRTH, DDEATH, NDATA and DDATA are published by this server's own edge node; NCMD and DCMD are commands to other edge nodes and devices."
+          },
+          "metrics": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "object",
+              "description": "One Sparkplug B metric.",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Metric name, e.g. 'temperature' or 'Node Control/Rebirth'. Unique within a birth."
+                },
+                "value": {
+                  "description": "The value. It must match type and fit its range: an integer for the int types, a number for float/double, true/false for boolean, a string for string/text/uuid, milliseconds since the Unix epoch for datetime, a hex string for bytes. null sends a null metric."
+                },
+                "type": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Sparkplug B datatype, case-insensitive: int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string). The datatype names list_sparkplug_nodes and read_messages show (Int32, Double, Boolean, ...) are accepted as they are.",
+                  "examples": [
+                    "int32",
+                    "double",
+                    "boolean",
+                    "string"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "value",
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The metrics to publish. NBIRTH: the node's metrics (optional; bdSeq and 'Node Control/Rebirth' are added by the server). DBIRTH: every metric of the device (may be empty). NDATA, DDATA, NCMD, DCMD: at least one. Not used by NDEATH and DDEATH."
           },
           "device_id": {
-            "title": "Device Id",
             "type": "string",
-            "description": "device id for the selected operation; see its mode description."
+            "minLength": 1,
+            "description": "DBIRTH, DDEATH, DDATA: a device of this server's own edge node. DCMD: the target device. Any non-empty text without '+', '/' or '#'."
           },
           "edge_node_id": {
-            "title": "Edge Node Id",
             "type": "string",
-            "description": "edge node id for the selected operation; see its mode description."
+            "minLength": 1,
+            "description": "NCMD, DCMD: the target edge node (required; there is no default target). Any non-empty text without '+', '/' or '#'."
           },
           "group_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ],
             "default": null,
-            "title": "Group Id",
-            "description": "group id for the selected operation; see its mode description."
+            "description": "NCMD, DCMD: the target group. Default: SPARKPLUG_GROUP_ID (see get_broker_info). Any non-empty text without '+', '/' or '#'."
           }
         },
         "required": [
@@ -104,265 +85,462 @@
         ],
         "oneOf": [
           {
+            "type": "object",
             "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "NBIRTH"
+              },
               "metrics": {
-                "anyOf": [
-                  {
-                    "items": {
-                      "additionalProperties": true,
-                      "type": "object"
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
                     },
-                    "type": "array"
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
                   },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "title": "Metrics"
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                },
+                "default": null
+              }
+            },
+            "required": [
+              "message_type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "NDEATH"
+              }
+            },
+            "required": [
+              "message_type"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "DBIRTH"
               },
-              "message_type": {
-                "const": "NBIRTH",
-                "type": "string"
-              }
-            },
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "message_type"
-            ]
-          },
-          {
-            "properties": {
-              "message_type": {
-                "const": "NDEATH",
-                "type": "string"
-              }
-            },
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "message_type"
-            ]
-          },
-          {
-            "properties": {
               "device_id": {
-                "title": "Device Id",
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "metrics": {
+                "type": "array",
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
-              },
-              "message_type": {
-                "const": "DBIRTH",
-                "type": "string"
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
+              "message_type",
               "device_id",
-              "metrics",
-              "message_type"
+              "metrics"
             ],
-            "type": "object",
             "additionalProperties": false
           },
           {
+            "type": "object",
             "properties": {
-              "device_id": {
-                "title": "Device Id",
-                "type": "string"
-              },
               "message_type": {
-                "const": "DDEATH",
-                "type": "string"
+                "type": "string",
+                "const": "DDEATH"
+              },
+              "device_id": {
+                "type": "string",
+                "minLength": 1
               }
             },
             "required": [
-              "device_id",
-              "message_type"
+              "message_type",
+              "device_id"
             ],
-            "type": "object",
             "additionalProperties": false
           },
           {
+            "type": "object",
             "properties": {
-              "metrics": {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
-              },
               "message_type": {
-                "const": "NDATA",
-                "type": "string"
-              }
-            },
-            "required": [
-              "metrics",
-              "message_type"
-            ],
-            "type": "object",
-            "additionalProperties": false
-          },
-          {
-            "properties": {
-              "device_id": {
-                "title": "Device Id",
-                "type": "string"
+                "type": "string",
+                "const": "NDATA"
               },
               "metrics": {
+                "type": "array",
+                "minItems": 1,
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
-              },
-              "message_type": {
-                "const": "DDATA",
-                "type": "string"
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
-              "device_id",
-              "metrics",
-              "message_type"
+              "message_type",
+              "metrics"
             ],
-            "type": "object",
             "additionalProperties": false
           },
           {
+            "type": "object",
             "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "DDATA"
+              },
+              "device_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "metrics": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "message_type",
+              "device_id",
+              "metrics"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "NCMD"
+              },
               "edge_node_id": {
-                "title": "Edge Node Id",
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "metrics": {
+                "type": "array",
+                "minItems": 1,
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
               },
               "group_id": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "string",
+                  "null"
                 ],
-                "default": null,
-                "title": "Group Id"
-              },
-              "message_type": {
-                "const": "NCMD",
-                "type": "string"
+                "default": null
               }
             },
             "required": [
+              "message_type",
               "edge_node_id",
-              "metrics",
-              "message_type"
+              "metrics"
             ],
-            "type": "object",
             "additionalProperties": false
           },
           {
+            "type": "object",
             "properties": {
+              "message_type": {
+                "type": "string",
+                "const": "DCMD"
+              },
               "edge_node_id": {
-                "title": "Edge Node Id",
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "device_id": {
-                "title": "Device Id",
-                "type": "string"
+                "type": "string",
+                "minLength": 1
               },
               "metrics": {
+                "type": "array",
+                "minItems": 1,
                 "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "title": "Metrics",
-                "type": "array"
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "value": {},
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value",
+                    "type"
+                  ],
+                  "additionalProperties": false
+                }
               },
               "group_id": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
+                "type": [
+                  "string",
+                  "null"
                 ],
-                "default": null,
-                "title": "Group Id"
-              },
-              "message_type": {
-                "const": "DCMD",
-                "type": "string"
+                "default": null
               }
             },
             "required": [
+              "message_type",
               "edge_node_id",
               "device_id",
-              "metrics",
-              "message_type"
+              "metrics"
             ],
-            "type": "object",
             "additionalProperties": false
           }
         ]
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "topic": {
+                    "type": "string"
+                  },
+                  "mid": {
+                    "type": "integer",
+                    "description": "MQTT message id."
+                  },
+                  "delivery": {
+                    "type": "string",
+                    "description": "What the success confirms about delivery."
+                  },
+                  "seq": {
+                    "type": "integer",
+                    "description": "Sequence number (this server's own node only)."
+                  },
+                  "bd_seq": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "metrics": {
+                    "type": "integer",
+                    "description": "Number of metrics in the payload."
+                  }
+                },
+                "required": [
+                  "topic",
+                  "mid",
+                  "delivery"
+                ]
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What went wrong, when success is false."
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "written",
+                  "not_sent",
+                  "unknown",
+                  "rejected"
+                ],
+                "description": "written: sent (QoS 1/2: acknowledged). not_sent: nothing left the server. unknown: it may have reached the broker; check before retrying. rejected: an explicit refusal that guarantees nothing was applied (never reported over MQTT 3.1.1)."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether the request may have left the server; null means an unexpected failure prevented dispatch tracking. Treat a null value as an unknown outcome and check before retrying."
+              }
+            }
+          }
+        },
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": false,
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": true
-      },
-      "outputSchema": {
-        "type": "object",
-        "required": [
-          "success",
-          "data",
-          "error",
-          "meta"
-        ],
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "data": {},
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "meta": {
-            "type": "object"
-          }
-        },
-        "additionalProperties": false
       }
     },
     {
       "name": "get_broker_info",
-      "description": "Report the broker connection and this server's configuration and state.\n\ndata: broker URL (credentials never shown), whether TLS is on, the client ID,\nwhether the server is connected right now and the last connection error,\nwhether writes are enabled (MQTT_WRITES_ENABLED), the subscriptions held, the\nnumber of buffered received messages, and the state of this server's own\nSparkplug B edge node (born or not, bdSeq, devices born). Does not contact\nthe broker.\n",
+      "description": "Report this server's connection to the MQTT broker and its configuration. Call it first: it says whether the broker is reachable (connected, last_error), whether writes are allowed (writes_enabled: while it is false every publish is refused), which subscriptions are held, how many received messages are buffered, and the state of this server's own Sparkplug B edge node. Does not contact the broker, so it answers even while the broker is down.",
       "inputSchema": {
-        "properties": {},
-        "title": "get_broker_infoArguments",
         "type": "object",
+        "properties": {},
+        "required": [],
         "additionalProperties": false
       },
       "outputSchema": {
@@ -377,46 +555,248 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "broker": {
+                    "type": "string",
+                    "description": "Broker URL; credentials are never shown."
+                  },
+                  "tls": {
+                    "type": "boolean"
+                  },
+                  "tls_verification": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "client_id": {
+                    "type": "string"
+                  },
+                  "username": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "connected": {
+                    "type": "boolean"
+                  },
+                  "last_error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "writes_enabled": {
+                    "type": "boolean",
+                    "description": "Whether the publish tools may send (MQTT_WRITES_ENABLED)."
+                  },
+                  "subscriptions": {
+                    "type": "array",
+                    "items": {
+                      "description": "A subscription this server holds, with the QoS the broker granted.",
+                      "type": "object",
+                      "properties": {
+                        "topic": {
+                          "type": "string"
+                        },
+                        "qos": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "topic",
+                        "qos"
+                      ]
+                    }
+                  },
+                  "buffered_messages": {
+                    "type": "integer"
+                  },
+                  "sparkplug": {
+                    "description": "This server's own Sparkplug B edge node.",
+                    "type": "object",
+                    "properties": {
+                      "group_id": {
+                        "type": "string"
+                      },
+                      "edge_node_id": {
+                        "type": "string"
+                      },
+                      "node_born": {
+                        "type": "boolean"
+                      },
+                      "bd_seq": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "last_seq": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "ndeath_will_registered": {
+                        "type": "boolean"
+                      },
+                      "devices_born": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "node_lost": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Why the node died unexpectedly (its NDEATH will was published), or null."
+                      }
+                    },
+                    "required": [
+                      "group_id",
+                      "edge_node_id",
+                      "node_born",
+                      "bd_seq",
+                      "last_seq",
+                      "ndeath_will_registered",
+                      "devices_born",
+                      "node_lost"
+                    ]
+                  }
+                },
+                "required": [
+                  "broker",
+                  "tls",
+                  "tls_verification",
+                  "client_id",
+                  "username",
+                  "connected",
+                  "last_error",
+                  "writes_enabled",
+                  "subscriptions",
+                  "buffered_messages",
+                  "sparkplug"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
     {
       "name": "subscribe_topic",
-      "description": "Subscribe this server to an MQTT topic filter so that matching messages are kept.\n\nReceived messages go into a buffer that read_messages returns (the newest\nMQTT_MESSAGE_BUFFER_SIZE, default 1000); Sparkplug B messages also update\nlist_sparkplug_nodes. A broker sends retained messages for the filter right\naway. Subscriptions are restored automatically after a reconnect.\n\nParameters:\n    topic: topic filter; '+' matches one level, '#' the rest (e.g. 'sensors/#',\n        'spBv1.0/#'). Filters starting with '$' other than '$SYS/' are broker\n        extensions such as shared ($share/, $queue/) or exclusive ($exclusive/)\n        subscriptions that change what other clients receive; they are refused\n        unless writes are enabled.\n    qos: maximum QoS for delivery to this server: 0, 1 or 2 (default 0).\n\ndata: the filter and the QoS the broker granted (success only after SUBACK).\n",
+      "description": "Subscribe this server to an MQTT topic filter, so that matching messages are kept for read_messages. MQTT is publish/subscribe: nothing can be read from a topic until this server is subscribed to it, and only messages that arrive afterwards are seen, plus the topic's retained message, which the broker sends at once. Subscribe to 'spBv1.0/#' to discover Sparkplug B edge nodes with list_sparkplug_nodes. Succeeds only once the broker acknowledges (SUBACK); data.granted_qos is the QoS it granted. Subscriptions are restored automatically after a reconnect. This changes nothing that other clients see.",
       "inputSchema": {
+        "type": "object",
         "properties": {
           "topic": {
-            "title": "Topic",
             "type": "string",
-            "description": "topic for the selected operation; see its mode description."
+            "minLength": 1,
+            "description": "Topic filter. '+' matches exactly one level, '#' (only as the whole last level) matches everything below. Filters starting with '$' other than '$SYS/' are broker extensions (shared $share/ and $queue/, exclusive $exclusive/) that change what other clients receive; they are refused unless writes are enabled.",
+            "examples": [
+              "sensors/#",
+              "plant/+/temperature",
+              "spBv1.0/#"
+            ]
           },
           "qos": {
-            "default": 0,
-            "title": "Qos",
             "type": "integer",
-            "description": "qos for the selected operation; see its mode description."
+            "enum": [
+              0,
+              1,
+              2
+            ],
+            "default": 0,
+            "description": "Highest QoS the broker may use to deliver matching messages to this server: 0 (at most once), 1 (at least once) or 2 (exactly once). The broker may grant less; data.granted_qos is what it granted. Default 0."
           }
         },
         "required": [
           "topic"
         ],
-        "title": "subscribe_topicArguments",
-        "type": "object",
         "additionalProperties": false
       },
       "outputSchema": {
@@ -431,40 +811,124 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "topic": {
+                    "type": "string"
+                  },
+                  "granted_qos": {
+                    "type": "integer",
+                    "description": "The QoS the broker granted."
+                  }
+                },
+                "required": [
+                  "topic",
+                  "granted_qos"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "requested_qos": {
+                "type": "integer"
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": true
       }
     },
     {
       "name": "unsubscribe_topic",
-      "description": "Remove one of this server's subscriptions (exactly as listed by list_subscriptions).\n\nAlready buffered messages stay readable. Fails if this server holds no\nsubscription with that exact filter.\n\nParameters:\n    topic: the subscribed topic filter, e.g. 'sensors/#'.\n",
+      "description": "Remove one of this server's subscriptions, named exactly as list_subscriptions shows it. Messages already buffered stay readable with read_messages. Fails with meta.code 'not_subscribed' if this server holds no subscription with that exact filter.",
       "inputSchema": {
+        "type": "object",
         "properties": {
           "topic": {
-            "title": "Topic",
             "type": "string",
-            "description": "topic for the selected operation; see its mode description."
+            "minLength": 1,
+            "description": "A filter exactly as list_subscriptions shows it, e.g. 'sensors/#'. Filters are compared as text: unsubscribing 'sensors/temp' does not end a 'sensors/#' subscription."
           }
         },
         "required": [
           "topic"
         ],
-        "title": "unsubscribe_topicArguments",
-        "type": "object",
         "additionalProperties": false
       },
       "outputSchema": {
@@ -479,31 +943,112 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "topic": {
+                    "type": "string"
+                  },
+                  "unsubscribed": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "topic",
+                  "unsubscribed"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": true
       }
     },
     {
       "name": "list_subscriptions",
-      "description": "List the subscriptions this server holds, with the QoS the broker granted.\n\ndata: a list of {topic, qos}. Only this server's own subscriptions; the\nbroker's other clients are not visible. Does not contact the broker.\n",
+      "description": "List the topic filters this server is subscribed to, with the QoS the broker granted for each. Only this server's own subscriptions: the broker's other clients are not visible. Does not contact the broker.",
       "inputSchema": {
-        "properties": {},
-        "title": "list_subscriptionsArguments",
         "type": "object",
+        "properties": {},
+        "required": [],
         "additionalProperties": false
       },
       "outputSchema": {
@@ -518,64 +1063,147 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "description": "A subscription this server holds, with the QoS the broker granted.",
+                  "type": "object",
+                  "properties": {
+                    "topic": {
+                      "type": "string"
+                    },
+                    "qos": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "topic",
+                    "qos"
+                  ]
+                }
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "count": {
+                "type": "integer"
+              },
+              "connected": {
+                "type": "boolean"
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
     {
       "name": "read_messages",
-      "description": "Return messages this server has received on its subscriptions.\n\nOnly messages that arrived after subscribe_topic are available, and only the\nnewest MQTT_MESSAGE_BUFFER_SIZE (default 1000) are kept. Each message has an\nincreasing id, topic, qos, retain flag, received_at (UTC), payload (UTF-8 text,\nor hex for binary and Sparkplug payloads) and, for Sparkplug B topics, the\ndecoded payload under 'sparkplug'.\n\nParameters:\n    topic_filter: only messages whose topic matches this filter (+/# allowed).\n    limit: at most this many messages, 1-1000 (default 50).\n    since_id: only messages with an id greater than this, oldest first; pass\n        meta.last_id from the previous call to poll for new messages. Without\n        since_id the newest `limit` messages are returned (oldest first).\n\nmeta: returned, has_more, buffered, dropped_total, last_id, and\nmissed_messages=true if messages after since_id were already dropped. Ids\nstart again at 1 when the server restarts.\n",
+      "description": "Return messages this server received on its subscriptions, oldest first. Only messages that arrived after subscribe_topic are available, and only the newest MQTT_MESSAGE_BUFFER_SIZE (default 1000) are kept. Each message has an increasing id, topic, qos, retain flag, received_at (UTC), payload (UTF-8 text, or hex for binary and Sparkplug payloads) and, for Sparkplug B topics, the decoded payload under 'sparkplug'.\n\nTo follow a topic, pass meta.last_id of the previous call as since_id. meta.has_more is true when more messages matched than limit allowed (with since_id, call again with the new meta.last_id for the rest). meta.missed_messages is true when messages after since_id were already pushed out of the buffer, and meta.dropped_total counts every message the buffer has pushed out. Does not contact the broker.",
       "inputSchema": {
+        "type": "object",
         "properties": {
           "topic_filter": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
             ],
             "default": null,
-            "title": "Topic Filter",
-            "description": "topic filter for the selected operation; see its mode description."
+            "description": "Only messages whose topic matches this filter ('+' and '#' allowed), e.g. 'sensors/+/temperature'. It filters what is buffered; it does not subscribe. Default: every buffered message."
           },
           "limit": {
-            "default": 50,
-            "title": "Limit",
             "type": "integer",
-            "description": "limit for the selected operation; see its mode description."
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50,
+            "description": "At most this many messages, 1-1000. Default 50."
           },
           "since_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "integer",
+              "null"
             ],
+            "minimum": 0,
             "default": null,
-            "title": "Since Id",
-            "description": "since id for the selected operation; see its mode description."
+            "description": "Only messages with an id greater than this, oldest first. Pass meta.last_id of the previous call to get only what arrived since. Omitted, the newest limit messages are returned (oldest first). Ids start again at 1 when the server restarts."
           }
         },
-        "title": "read_messagesArguments",
-        "type": "object",
+        "required": [],
         "additionalProperties": false
       },
       "outputSchema": {
@@ -590,31 +1218,250 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "description": "Increasing id; pass the last one as since_id to read only newer messages."
+                    },
+                    "topic": {
+                      "type": "string"
+                    },
+                    "qos": {
+                      "type": "integer"
+                    },
+                    "retain": {
+                      "type": "boolean"
+                    },
+                    "received_at": {
+                      "type": "string",
+                      "description": "UTC time it arrived, ISO 8601."
+                    },
+                    "payload_size": {
+                      "type": "integer"
+                    },
+                    "payload": {
+                      "type": "string"
+                    },
+                    "payload_encoding": {
+                      "type": "string",
+                      "enum": [
+                        "utf-8",
+                        "hex"
+                      ]
+                    },
+                    "payload_truncated": {
+                      "type": "boolean"
+                    },
+                    "sparkplug": {
+                      "description": "A decoded Sparkplug B payload.",
+                      "type": "object",
+                      "properties": {
+                        "timestamp": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "seq": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "metrics": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "name": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "datatype": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "Sparkplug datatype name, e.g. 'Int32', or null if the metric carries none and none is known."
+                              },
+                              "value": {},
+                              "alias": {
+                                "type": "integer"
+                              },
+                              "timestamp": {
+                                "type": "integer"
+                              },
+                              "is_null": {
+                                "type": "boolean"
+                              },
+                              "is_historical": {
+                                "type": "boolean"
+                              },
+                              "is_transient": {
+                                "type": "boolean"
+                              }
+                            },
+                            "required": [
+                              "name",
+                              "datatype",
+                              "value"
+                            ]
+                          }
+                        },
+                        "uuid": {
+                          "type": "string"
+                        },
+                        "body_hex": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "timestamp",
+                        "seq",
+                        "metrics"
+                      ]
+                    },
+                    "sparkplug_error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "topic",
+                    "qos",
+                    "retain",
+                    "received_at",
+                    "payload_size",
+                    "payload",
+                    "payload_encoding"
+                  ]
+                }
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "returned": {
+                "type": "integer"
+              },
+              "has_more": {
+                "type": "boolean",
+                "description": "More messages matched than limit allowed."
+              },
+              "buffered": {
+                "type": "integer"
+              },
+              "buffer_size": {
+                "type": "integer"
+              },
+              "dropped_total": {
+                "type": "integer",
+                "description": "Messages pushed out of the full buffer since the server started."
+              },
+              "last_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Pass as since_id next time."
+              },
+              "missed_messages": {
+                "type": "boolean",
+                "description": "Messages after since_id were already pushed out of the buffer."
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
     {
       "name": "list_sparkplug_nodes",
-      "description": "List Sparkplug B edge nodes and devices seen in messages this server received.\n\nDiscovery is passive: a node appears only after one of its NBIRTH, NDATA,\nNDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this\nserver holds (subscribe to 'spBv1.0/#', or 'spBv1.0/<group>/#', first). Births\nare not retained, so a node that was born before the subscription shows up\nwith its next data message; metrics that its data messages send without a\ndatatype then show their raw stored value until the node is reborn.\n\ndata.nodes: per node group_id, edge_node_id, online (true/false, or null if\nunknown), last_message_type, last_seen, bd_seq, the latest metric values, and\nits devices with the same fields. data.this_server: the edge node this server\nitself publishes as (see publish_node_birth). Does not contact the broker.\n",
+      "description": "List the Sparkplug B edge nodes and devices seen in messages this server received, with their online state, bdSeq and latest metric values. Each metric shows its Sparkplug datatype, which publish_sparkplug accepts as the metric type of a command. Discovery is passive: a node appears only after one of its NBIRTH, NDATA, NDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this server holds, so subscribe to 'spBv1.0/#' (or 'spBv1.0/<group>/#') first. Births are not retained, so a node born before the subscription shows up with its next data message; metrics that its data messages send without a datatype then show their raw stored value until the node is reborn. online is null when unknown, for example after this server reconnected. data.this_server is the edge node this server itself publishes as (publish_sparkplug). Does not contact the broker.",
       "inputSchema": {
-        "properties": {},
-        "title": "list_sparkplug_nodesArguments",
         "type": "object",
+        "properties": {},
+        "required": [],
         "additionalProperties": false
       },
       "outputSchema": {
@@ -629,40 +1476,319 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "nodes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "group_id": {
+                          "type": "string"
+                        },
+                        "edge_node_id": {
+                          "type": "string"
+                        },
+                        "online": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ],
+                          "description": "true/false from its births, data and deaths; null when unknown."
+                        },
+                        "last_message_type": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "last_seen": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "UTC time of its last message, ISO 8601."
+                        },
+                        "metrics": {
+                          "type": "object",
+                          "description": "Latest value per metric name.",
+                          "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                              "value": {},
+                              "datatype": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "timestamp": {
+                                "type": [
+                                  "integer",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "required": [
+                              "value",
+                              "datatype"
+                            ]
+                          }
+                        },
+                        "bd_seq": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "last_seq": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "devices": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "device_id": {
+                                "type": "string"
+                              },
+                              "online": {
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ],
+                                "description": "true/false from its births, data and deaths; null when unknown."
+                              },
+                              "last_message_type": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "last_seen": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ],
+                                "description": "UTC time of its last message, ISO 8601."
+                              },
+                              "metrics": {
+                                "type": "object",
+                                "description": "Latest value per metric name.",
+                                "additionalProperties": {
+                                  "type": "object",
+                                  "properties": {
+                                    "value": {},
+                                    "datatype": {
+                                      "type": [
+                                        "string",
+                                        "null"
+                                      ]
+                                    },
+                                    "timestamp": {
+                                      "type": [
+                                        "integer",
+                                        "null"
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "value",
+                                    "datatype"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "device_id",
+                              "online",
+                              "last_message_type",
+                              "last_seen",
+                              "metrics"
+                            ]
+                          }
+                        },
+                        "stale_ndeath_ignored": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "group_id",
+                        "edge_node_id",
+                        "online",
+                        "last_message_type",
+                        "last_seen",
+                        "metrics",
+                        "bd_seq",
+                        "last_seq",
+                        "devices"
+                      ]
+                    }
+                  },
+                  "this_server": {
+                    "description": "This server's own Sparkplug B edge node.",
+                    "type": "object",
+                    "properties": {
+                      "group_id": {
+                        "type": "string"
+                      },
+                      "edge_node_id": {
+                        "type": "string"
+                      },
+                      "node_born": {
+                        "type": "boolean"
+                      },
+                      "bd_seq": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "last_seq": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "ndeath_will_registered": {
+                        "type": "boolean"
+                      },
+                      "devices_born": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "node_lost": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Why the node died unexpectedly (its NDEATH will was published), or null."
+                      }
+                    },
+                    "required": [
+                      "group_id",
+                      "edge_node_id",
+                      "node_born",
+                      "bd_seq",
+                      "last_seq",
+                      "ndeath_will_registered",
+                      "devices_born",
+                      "node_lost"
+                    ]
+                  }
+                },
+                "required": [
+                  "nodes",
+                  "this_server"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "count": {
+                "type": "integer"
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
     {
       "name": "decode_sparkplug_payload",
-      "description": "Decode a hex-encoded Sparkplug B protobuf payload (as read_messages shows it).\n\nParameters:\n    payload_hex: the payload bytes as hex (spaces and a 0x prefix are ignored).\n\ndata: timestamp, seq (null if absent), and metrics with name, alias,\ntimestamp, datatype and value. Signed integer types are shown as signed\nnumbers when the metric carries its datatype; a metric without datatype\n(allowed in DATA and CMD messages) shows its raw stored value. Fails with\nsuccess:false if the hex is invalid or the bytes cannot be parsed as the\nSparkplug B protobuf (protobuf cannot tell every other byte string apart, so\nsuccess does not prove the bytes came from a Sparkplug node).\n",
+      "description": "Decode a hex-encoded Sparkplug B protobuf payload into its timestamp, seq and metrics (name, alias, timestamp, datatype, value). read_messages already decodes Sparkplug topics under 'sparkplug'; use this for a payload from elsewhere. Signed integers are shown as signed numbers when the metric carries its datatype; a metric without one (allowed in DATA and CMD messages) shows its raw stored value. Protobuf cannot tell every other byte string apart, so success does not prove the bytes came from a Sparkplug node.",
       "inputSchema": {
+        "type": "object",
         "properties": {
           "payload_hex": {
-            "title": "Payload Hex",
             "type": "string",
-            "description": "payload hex for the selected operation; see its mode description."
+            "description": "The payload bytes as hex, as read_messages shows a Sparkplug payload (payload_encoding 'hex'). Spaces and a 0x prefix are ignored."
           }
         },
         "required": [
           "payload_hex"
         ],
-        "title": "decode_sparkplug_payloadArguments",
-        "type": "object",
         "additionalProperties": false
       },
       "outputSchema": {
@@ -677,58 +1803,196 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "description": "A decoded Sparkplug B payload.",
+                "type": "object",
+                "properties": {
+                  "timestamp": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "seq": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "metrics": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "datatype": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "description": "Sparkplug datatype name, e.g. 'Int32', or null if the metric carries none and none is known."
+                        },
+                        "value": {},
+                        "alias": {
+                          "type": "integer"
+                        },
+                        "timestamp": {
+                          "type": "integer"
+                        },
+                        "is_null": {
+                          "type": "boolean"
+                        },
+                        "is_historical": {
+                          "type": "boolean"
+                        },
+                        "is_transient": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "datatype",
+                        "value"
+                      ]
+                    }
+                  },
+                  "uuid": {
+                    "type": "string"
+                  },
+                  "body_hex": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "timestamp",
+                  "seq",
+                  "metrics"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,
+        "idempotentHint": true,
         "openWorldHint": false
       }
     },
     {
       "name": "publish_message",
-      "description": "WRITE: publish a UTF-8 text message to an MQTT topic.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false and publishes\nnothing.\n\nAny subscriber gets the message, and on a plant network that can include\ndevices that act on it, so this is gated like the Sparkplug commands. With\nretain=true the broker keeps the message and hands it to every future\nsubscriber.\n\nParameters:\n    topic: topic name without wildcards, e.g. 'sensors/temp'.\n    payload: message text (sent as UTF-8).\n    qos: 0, 1 or 2 (default 0).\n    retain: keep the message on the broker as the topic's retained message.\n\nSent at most once: success:true (meta.outcome \"written\") means QoS 0: written\nto the network (the broker does not acknowledge QoS 0); QoS 1/2: the broker\nacknowledged it (an MQTT 3.1.1 broker acknowledges even a publish its ACL\ndrops). meta.outcome \"not_sent\" means nothing left the server. \"unknown\"\nmeans it may have reached the broker: the server does not send it again, so\ncheck before retrying. If the connection drops while the call waits for the\nacknowledgement, the message is given up (never resent on reconnect).\n",
+      "description": "WRITE: publish a UTF-8 text message to an MQTT topic.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAny subscriber gets the message, and on a plant network that can include devices that act on it. With retain=true the broker keeps the message and hands it to every future subscriber. For Sparkplug B topics (spBv1.0/...) use publish_sparkplug, which encodes the protobuf payload.\n\nSent at most once. success:true (meta.outcome 'written') means: QoS 0 written to the network, which the broker does not acknowledge; QoS 1/2 acknowledged by the broker (a broker acknowledges even a publish its ACL silently drops). Neither says that anyone acted on it. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have reached the broker: the server never sends it again, so check before retrying.",
       "inputSchema": {
+        "type": "object",
         "properties": {
           "topic": {
-            "title": "Topic",
             "type": "string",
-            "description": "topic for the selected operation; see its mode description."
+            "minLength": 1,
+            "description": "Topic name to publish to, without wildcards ('+', '#'), e.g. 'sensors/temp'."
           },
           "payload": {
-            "title": "Payload",
             "type": "string",
-            "description": "payload for the selected operation; see its mode description."
+            "description": "Message text, sent as UTF-8. Binary payloads are not supported."
           },
           "qos": {
-            "default": 0,
-            "title": "Qos",
             "type": "integer",
-            "description": "qos for the selected operation; see its mode description."
+            "enum": [
+              0,
+              1,
+              2
+            ],
+            "default": 0,
+            "description": "0: written to the network once, not acknowledged. 1: acknowledged by the broker (PUBACK). 2: acknowledged by the broker (PUBCOMP). Default 0. Whatever the QoS, this server sends the message at most once."
           },
           "retain": {
-            "default": false,
-            "title": "Retain",
             "type": "boolean",
-            "description": "retain for the selected operation; see its mode description."
+            "default": false,
+            "description": "Keep the message on the broker as the topic's retained message, which every future subscriber receives at once. Default false."
           }
         },
         "required": [
           "topic",
           "payload"
         ],
-        "title": "publish_messageArguments",
-        "type": "object",
         "additionalProperties": false
       },
       "outputSchema": {
@@ -743,18 +2007,134 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "topic": {
+                    "type": "string"
+                  },
+                  "mid": {
+                    "type": "integer",
+                    "description": "MQTT message id."
+                  },
+                  "delivery": {
+                    "type": "string",
+                    "description": "What the success confirms about delivery."
+                  },
+                  "qos": {
+                    "type": "integer"
+                  },
+                  "retain": {
+                    "type": "boolean"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "description": "Payload size in bytes."
+                  }
+                },
+                "required": [
+                  "topic",
+                  "qos",
+                  "retain",
+                  "bytes",
+                  "mid",
+                  "delivery"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "What went wrong, when success is false."
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_arguments",
+                  "writes_disabled",
+                  "policy_denied",
+                  "resource_limit",
+                  "audit_unavailable",
+                  "endpoint_offline",
+                  "deadline_exceeded",
+                  "cancelled",
+                  "outcome_unknown",
+                  "send_failed",
+                  "broker_refused",
+                  "not_born",
+                  "not_subscribed",
+                  "internal_error"
+                ],
+                "description": "Why the call failed; set whenever success is false. See the contract's errors."
+              },
+              "tool": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string",
+                "description": "A hint about an empty or surprising result."
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "written",
+                  "not_sent",
+                  "unknown",
+                  "rejected"
+                ],
+                "description": "written: sent (QoS 1/2: acknowledged). not_sent: nothing left the server. unknown: it may have reached the broker; check before retrying. rejected: an explicit refusal that guarantees nothing was applied (never reported over MQTT 3.1.1)."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Whether the request may have left the server; null means an unexpected failure prevented dispatch tracking. Treat a null value as an unknown outcome and check before retrying."
+              }
+            }
           }
         },
-        "additionalProperties": false
+        "additionalProperties": false,
+        "if": {
+          "properties": {
+            "success": {
+              "const": false
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "type": "string"
+            },
+            "meta": {
+              "required": [
+                "code"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "error": {
+              "type": "null"
+            }
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": false,
@@ -776,31 +2156,40 @@
         "DDATA": "publish_device_data",
         "NCMD": "publish_node_command",
         "DCMD": "publish_device_command"
-      }
+      },
+      "resultShape": "sparkplugPublished"
     },
     "get_broker_info": {
-      "handler": "get_broker_info"
+      "handler": "get_broker_info",
+      "resultShape": "brokerInfo"
     },
     "subscribe_topic": {
-      "handler": "subscribe_topic"
+      "handler": "subscribe_topic",
+      "resultShape": "subscription"
     },
     "unsubscribe_topic": {
-      "handler": "unsubscribe_topic"
+      "handler": "unsubscribe_topic",
+      "resultShape": "unsubscription"
     },
     "list_subscriptions": {
-      "handler": "list_subscriptions"
+      "handler": "list_subscriptions",
+      "resultShape": "subscriptions"
     },
     "read_messages": {
-      "handler": "read_messages"
+      "handler": "read_messages",
+      "resultShape": "messages"
     },
     "list_sparkplug_nodes": {
-      "handler": "list_sparkplug_nodes"
+      "handler": "list_sparkplug_nodes",
+      "resultShape": "sparkplugNodes"
     },
     "decode_sparkplug_payload": {
-      "handler": "decode_sparkplug_payload"
+      "handler": "decode_sparkplug_payload",
+      "resultShape": "sparkplugPayload"
     },
     "publish_message": {
-      "handler": "publish_message"
+      "handler": "publish_message",
+      "resultShape": "published"
     }
   },
   "legacy": {
@@ -1159,6 +2548,681 @@
       }
     },
     "additionalProperties": false
+  },
+  "resultShapes": {
+    "$comment": "What data holds when success is true; on failure data is null. Fields not listed may be added, so a client should ignore what it does not know. Each tool's outputSchema embeds its shape (routes -> resultShape).",
+    "brokerInfo": {
+      "type": "object",
+      "properties": {
+        "broker": {
+          "type": "string",
+          "description": "Broker URL; credentials are never shown."
+        },
+        "tls": {
+          "type": "boolean"
+        },
+        "tls_verification": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connected": {
+          "type": "boolean"
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writes_enabled": {
+          "type": "boolean",
+          "description": "Whether the publish tools may send (MQTT_WRITES_ENABLED)."
+        },
+        "subscriptions": {
+          "type": "array",
+          "items": {
+            "description": "A subscription this server holds, with the QoS the broker granted.",
+            "type": "object",
+            "properties": {
+              "topic": {
+                "type": "string"
+              },
+              "qos": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "topic",
+              "qos"
+            ]
+          }
+        },
+        "buffered_messages": {
+          "type": "integer"
+        },
+        "sparkplug": {
+          "description": "This server's own Sparkplug B edge node.",
+          "type": "object",
+          "properties": {
+            "group_id": {
+              "type": "string"
+            },
+            "edge_node_id": {
+              "type": "string"
+            },
+            "node_born": {
+              "type": "boolean"
+            },
+            "bd_seq": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_seq": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "ndeath_will_registered": {
+              "type": "boolean"
+            },
+            "devices_born": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "node_lost": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the node died unexpectedly (its NDEATH will was published), or null."
+            }
+          },
+          "required": [
+            "group_id",
+            "edge_node_id",
+            "node_born",
+            "bd_seq",
+            "last_seq",
+            "ndeath_will_registered",
+            "devices_born",
+            "node_lost"
+          ]
+        }
+      },
+      "required": [
+        "broker",
+        "tls",
+        "tls_verification",
+        "client_id",
+        "username",
+        "connected",
+        "last_error",
+        "writes_enabled",
+        "subscriptions",
+        "buffered_messages",
+        "sparkplug"
+      ]
+    },
+    "subscription": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "granted_qos": {
+          "type": "integer",
+          "description": "The QoS the broker granted."
+        }
+      },
+      "required": [
+        "topic",
+        "granted_qos"
+      ]
+    },
+    "unsubscription": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "unsubscribed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "topic",
+        "unsubscribed"
+      ]
+    },
+    "subscriptions": {
+      "type": "array",
+      "items": {
+        "description": "A subscription this server holds, with the QoS the broker granted.",
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string"
+          },
+          "qos": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "topic",
+          "qos"
+        ]
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Increasing id; pass the last one as since_id to read only newer messages."
+          },
+          "topic": {
+            "type": "string"
+          },
+          "qos": {
+            "type": "integer"
+          },
+          "retain": {
+            "type": "boolean"
+          },
+          "received_at": {
+            "type": "string",
+            "description": "UTC time it arrived, ISO 8601."
+          },
+          "payload_size": {
+            "type": "integer"
+          },
+          "payload": {
+            "type": "string"
+          },
+          "payload_encoding": {
+            "type": "string",
+            "enum": [
+              "utf-8",
+              "hex"
+            ]
+          },
+          "payload_truncated": {
+            "type": "boolean"
+          },
+          "sparkplug": {
+            "description": "A decoded Sparkplug B payload.",
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "seq": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "datatype": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Sparkplug datatype name, e.g. 'Int32', or null if the metric carries none and none is known."
+                    },
+                    "value": {},
+                    "alias": {
+                      "type": "integer"
+                    },
+                    "timestamp": {
+                      "type": "integer"
+                    },
+                    "is_null": {
+                      "type": "boolean"
+                    },
+                    "is_historical": {
+                      "type": "boolean"
+                    },
+                    "is_transient": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "datatype",
+                    "value"
+                  ]
+                }
+              },
+              "uuid": {
+                "type": "string"
+              },
+              "body_hex": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "timestamp",
+              "seq",
+              "metrics"
+            ]
+          },
+          "sparkplug_error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic",
+          "qos",
+          "retain",
+          "received_at",
+          "payload_size",
+          "payload",
+          "payload_encoding"
+        ]
+      }
+    },
+    "sparkplugNodes": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "group_id": {
+                "type": "string"
+              },
+              "edge_node_id": {
+                "type": "string"
+              },
+              "online": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true/false from its births, data and deaths; null when unknown."
+              },
+              "last_message_type": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "last_seen": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "UTC time of its last message, ISO 8601."
+              },
+              "metrics": {
+                "type": "object",
+                "description": "Latest value per metric name.",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "value": {},
+                    "datatype": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "timestamp": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "datatype"
+                  ]
+                }
+              },
+              "bd_seq": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "last_seq": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "devices": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "device_id": {
+                      "type": "string"
+                    },
+                    "online": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ],
+                      "description": "true/false from its births, data and deaths; null when unknown."
+                    },
+                    "last_message_type": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "last_seen": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "UTC time of its last message, ISO 8601."
+                    },
+                    "metrics": {
+                      "type": "object",
+                      "description": "Latest value per metric name.",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "value": {},
+                          "datatype": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "timestamp": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "value",
+                          "datatype"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "device_id",
+                    "online",
+                    "last_message_type",
+                    "last_seen",
+                    "metrics"
+                  ]
+                }
+              },
+              "stale_ndeath_ignored": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "group_id",
+              "edge_node_id",
+              "online",
+              "last_message_type",
+              "last_seen",
+              "metrics",
+              "bd_seq",
+              "last_seq",
+              "devices"
+            ]
+          }
+        },
+        "this_server": {
+          "description": "This server's own Sparkplug B edge node.",
+          "type": "object",
+          "properties": {
+            "group_id": {
+              "type": "string"
+            },
+            "edge_node_id": {
+              "type": "string"
+            },
+            "node_born": {
+              "type": "boolean"
+            },
+            "bd_seq": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_seq": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "ndeath_will_registered": {
+              "type": "boolean"
+            },
+            "devices_born": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "node_lost": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why the node died unexpectedly (its NDEATH will was published), or null."
+            }
+          },
+          "required": [
+            "group_id",
+            "edge_node_id",
+            "node_born",
+            "bd_seq",
+            "last_seq",
+            "ndeath_will_registered",
+            "devices_born",
+            "node_lost"
+          ]
+        }
+      },
+      "required": [
+        "nodes",
+        "this_server"
+      ]
+    },
+    "sparkplugPayload": {
+      "description": "A decoded Sparkplug B payload.",
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "seq": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "metrics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "datatype": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Sparkplug datatype name, e.g. 'Int32', or null if the metric carries none and none is known."
+              },
+              "value": {},
+              "alias": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "integer"
+              },
+              "is_null": {
+                "type": "boolean"
+              },
+              "is_historical": {
+                "type": "boolean"
+              },
+              "is_transient": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "name",
+              "datatype",
+              "value"
+            ]
+          }
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "body_hex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "seq",
+        "metrics"
+      ]
+    },
+    "published": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "mid": {
+          "type": "integer",
+          "description": "MQTT message id."
+        },
+        "delivery": {
+          "type": "string",
+          "description": "What the success confirms about delivery."
+        },
+        "qos": {
+          "type": "integer"
+        },
+        "retain": {
+          "type": "boolean"
+        },
+        "bytes": {
+          "type": "integer",
+          "description": "Payload size in bytes."
+        }
+      },
+      "required": [
+        "topic",
+        "qos",
+        "retain",
+        "bytes",
+        "mid",
+        "delivery"
+      ]
+    },
+    "sparkplugPublished": {
+      "type": "object",
+      "properties": {
+        "topic": {
+          "type": "string"
+        },
+        "mid": {
+          "type": "integer",
+          "description": "MQTT message id."
+        },
+        "delivery": {
+          "type": "string",
+          "description": "What the success confirms about delivery."
+        },
+        "seq": {
+          "type": "integer",
+          "description": "Sequence number (this server's own node only)."
+        },
+        "bd_seq": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "metrics": {
+          "type": "integer",
+          "description": "Number of metrics in the payload."
+        }
+      },
+      "required": [
+        "topic",
+        "mid",
+        "delivery"
+      ]
+    }
+  },
+  "errors": {
+    "$comment": "Every meta.code a failed call (success:false) can carry, and what to do about it. A client should branch on meta.code, never on the wording of error. Each tool's outputSchema lists these codes, and a failed result always has one.",
+    "invalid_arguments": "An argument is missing, has the wrong type or is out of range; error names it. Nothing was sent. Fix the arguments and call again.",
+    "writes_disabled": "This server is read-only: MQTT_WRITES_ENABLED is not true. Nothing was sent. Only whoever runs the server can enable writes, so do not retry.",
+    "policy_denied": "The deployment policy (MQTT_POLICY_FILE) does not allow this tool or operation. Nothing was sent.",
+    "resource_limit": "Too many calls are in flight, or the request is too large. Nothing was sent. Retry once running calls finish, or send less.",
+    "audit_unavailable": "The audit log (audit_path) could not record the write's intent, so the write was refused. Nothing was sent.",
+    "endpoint_offline": "The broker could not be reached, or the connection dropped before anything was written. Nothing was sent; the server keeps reconnecting in the background. Check get_broker_info and call again once connected is true.",
+    "deadline_exceeded": "The call ran out of time (MQTT_TOOL_TIMEOUT) before anything was sent. Nothing was sent, and it will not be sent later.",
+    "cancelled": "The MCP client cancelled the call or disconnected, or the server is shutting down. Nothing was sent.",
+    "outcome_unknown": "The message may have reached the broker (meta.outcome 'unknown'). The server never sends it again. Check its effect first, for example a device's next DDATA through read_messages, before calling again.",
+    "send_failed": "The MQTT client could not send the request. Nothing was sent.",
+    "broker_refused": "The broker refused the request, for example a subscription its ACL forbids.",
+    "not_born": "This server's Sparkplug B edge node, or the device, is not born: publish NBIRTH (and DBIRTH for a device) with publish_sparkplug first. Nothing was sent.",
+    "not_subscribed": "This server holds no subscription with exactly that filter; list_subscriptions shows the ones it holds.",
+    "internal_error": "An unexpected error inside this server. It is logged on the server's stderr."
   },
   "localStatusTools": [
     "get_broker_info"

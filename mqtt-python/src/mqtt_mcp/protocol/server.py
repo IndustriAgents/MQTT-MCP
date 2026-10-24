@@ -138,11 +138,16 @@ class EnvelopeFastMCP(FastMCP):
                     return result
                 except asyncio.TimeoutError:
                     return self._ended_early(
-                        name, state, f"did not finish within its deadline of {deadline:g}s"
+                        name,
+                        state,
+                        f"did not finish within its deadline of {deadline:g}s",
+                        "deadline_exceeded",
                     )
                 finally:
                     self._active_calls.discard(scope)
-            return self._ended_early(name, state, "was cancelled: the MCP client disconnected")
+            return self._ended_early(
+                name, state, "was cancelled: the MCP client disconnected", "cancelled"
+            )
         finally:
             _send_state.reset(token)
 
@@ -156,18 +161,23 @@ class EnvelopeFastMCP(FastMCP):
             return None
         return getattr(responder, "_cancel_scope", None)
 
-    def _ended_early(self, name: str, state: SendState, why: str) -> dict[str, Any]:
+    def _ended_early(self, name: str, state: SendState, why: str, code: str) -> dict[str, Any]:
         if name not in WRITE_TOOLS:
-            return _fail(f"{name} {why}; nothing was changed", tool=name)
+            return _fail(f"{name} {why}; nothing was changed", code=code, tool=name)
         if not state.sent or state.outcome == "not_sent":
             return _fail(
                 f"{name} {why}. Nothing was sent, and it will not be sent later.",
+                code=code,
                 tool=name,
                 outcome="not_sent",
                 request_sent=False,
             )
         return _fail(
-            f"{name} {why}. {UNKNOWN_HINT}", tool=name, outcome="unknown", request_sent=True
+            f"{name} {why}. {UNKNOWN_HINT}",
+            code="outcome_unknown",
+            tool=name,
+            outcome="unknown",
+            request_sent=True,
         )
 
     async def _call_enveloped(self, name: str, arguments: dict[str, Any]):
@@ -182,7 +192,9 @@ class EnvelopeFastMCP(FastMCP):
                     for err in exc.errors()
                 )
                 meta = {"outcome": "not_sent", "request_sent": False} if name in WRITE_TOOLS else {}
-                return _fail(f"Invalid arguments: {problems}", tool=name, **meta)
+                return _fail(
+                    f"Invalid arguments: {problems}", code="invalid_arguments", tool=name, **meta
+                )
         # Errors raised by a running handler, including ValidationError, do not
         # prove that a publication was never sent. The contract preserves that.
         return await super().call_tool(name, arguments)
