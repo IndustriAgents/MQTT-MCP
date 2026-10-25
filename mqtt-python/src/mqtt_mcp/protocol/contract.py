@@ -192,10 +192,10 @@ class ContractBoundary:
         result = None
         try:
             result = await self.original_call(handler, forwarded)
-        except Exception:
+        except Exception as exc:
             # An arbitrary adapter/SDK failure cannot prove that native dispatch
             # did not happen. Never encourage a retry by guessing not_sent.
-            log.exception("Unexpected error while executing tool %s", name)
+            log.error("Unexpected error while executing tool %s (%s)", name, type(exc).__name__)
             meta = {"tool": name, "code": "internal_error"}
             if write:
                 meta.update(outcome="unknown", request_sent=None)

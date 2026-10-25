@@ -106,13 +106,14 @@ def _make_server(settings=None):
         "MQTT-Control",
         instructions=(
             "MQTT and Sparkplug B access to one broker. "
-            "Read-only by default: subscribe_topic, then "
+            "Publishing is disabled by default. Use subscribe_topic, then "
             "read_messages to see traffic; "
             "list_sparkplug_nodes shows Sparkplug edge nodes "
             "seen on your subscriptions (subscribe to "
             "'spBv1.0/#' first). Publishing tools return "
             "success:false unless the server runs with "
             "MQTT_WRITES_ENABLED=true; check get_broker_info."
+            " Explicit read_only policy also blocks subscription changes."
             " Every result is {success, data, error, meta}."
         ),
         lifespan=mqtt_lifespan,

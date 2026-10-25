@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "publish_sparkplug",
-      "description": "WRITE: publish a Sparkplug B message. Set message_type and give only the arguments of that mode.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAs this server's own edge node (SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID, see get_broker_info; never the ID of a real edge node):\n- NBIRTH (metrics?): make this server an edge node and publish its birth. The first NBIRTH reconnects with an NDEATH Last Will carrying a new bdSeq, so the broker announces the node's death if the server disappears. bdSeq and 'Node Control/Rebirth' are added for you; seq is 0. Publishing NBIRTH again is a rebirth: devices must then be born again. After an unexpected disconnect the node is dead and needs a new NBIRTH.\n- NDEATH: take the node offline (QoS 1, confirmed by the broker). Its devices count as dead; the next NBIRTH uses a new bdSeq.\n- DBIRTH (device_id, metrics): birth of a device of this node. Needs a born node.\n- DDEATH (device_id): death of a device born with DBIRTH.\n- NDATA (metrics): new values of the node's metrics. Needs a born node.\n- DDATA (device_id, metrics): new values of a device born with DBIRTH.\nThese use the node's next seq. The server does not act on commands sent to its own node.\n\nCommands to other edge nodes, which can change real equipment:\n- NCMD (edge_node_id, metrics, group_id?): e.g. {\"name\": \"Node Control/Rebirth\", \"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n- DCMD (edge_node_id, device_id, metrics, group_id?): the edge node applies the metrics to the device.\n\nSent at most once. success:true (meta.outcome 'written') means the message was written to the network (QoS 0, as the specification requires; NDEATH: acknowledged by the broker). For a command that does not mean the node applied it: read its next NDATA or DDATA with read_messages to confirm. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have gone out: the server never sends it again, so check before retrying.\n\nMetrics are a list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string), case-insensitive, so the datatype names list_sparkplug_nodes shows (Int32, Double, ...) work too. The value must match the type and fit its range; null sends a null metric. An invalid metric is refused before anything is sent.",
+      "description": "WRITE: publish a Sparkplug B message. Set message_type and give only the arguments of that mode.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAs this server's own edge node (SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID, see get_broker_info; never the ID of a real edge node):\n- NBIRTH (metrics?): make this server an edge node and publish its birth. The first NBIRTH reconnects with an NDEATH Last Will carrying a new bdSeq, so the broker announces the node's death if the server disappears. bdSeq and 'Node Control/Rebirth' are added for you; seq is 0. Publishing NBIRTH again is a rebirth: devices must then be born again. After an unexpected disconnect the node is dead and needs a new NBIRTH.\n- NDEATH: take the node offline (QoS 1, confirmed by the broker). Its devices count as dead; the next NBIRTH uses a new bdSeq.\n- DBIRTH (device_id, metrics): birth of a device of this node. Needs a born node.\n- DDEATH (device_id): death of a device born with DBIRTH.\n- NDATA (metrics): new values of the node's metrics. Needs a born node.\n- DDATA (device_id, metrics): new values of a device born with DBIRTH.\nThese use the node's next seq. The server does not act on commands sent to its own node.\n\nCommands to other edge nodes, which can change real equipment:\n- NCMD (edge_node_id, metrics, group_id?): e.g. {\"name\": \"Node Control/Rebirth\", \"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n- DCMD (edge_node_id, device_id, metrics, group_id?): the edge node applies the metrics to the device.\n\nSent at most once. success:true (meta.outcome 'written') means the message was written to the network (QoS 0, as the specification requires; NDEATH: acknowledged by the broker). For a command that does not mean the node applied it: read its next NDATA or DDATA with read_messages to confirm. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have gone out: the server never sends it again, so check before retrying.\n\nMetrics are a list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string), case-insensitive, so the datatype names list_sparkplug_nodes shows (Int32, Double, ...) work too. The value must match the type and fit its range; null sends a null metric. An invalid metric is refused before anything is sent. For int64, uint64 and datetime values, plain decimal strings are accepted to preserve precision through JSON clients.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -417,7 +417,10 @@
                     "description": "What the success confirms about delivery."
                   },
                   "seq": {
-                    "type": "integer",
+                    "type": [
+                      "integer",
+                      "string"
+                    ],
                     "description": "Sequence number (this server's own node only)."
                   },
                   "bd_seq": {
@@ -642,7 +645,8 @@
                       "last_seq": {
                         "type": [
                           "integer",
-                          "null"
+                          "null",
+                          "string"
                         ]
                       },
                       "ndeath_will_registered": {
@@ -672,6 +676,74 @@
                       "devices_born",
                       "node_lost"
                     ]
+                  },
+                  "capabilities": {
+                    "type": "object",
+                    "properties": {
+                      "protocol": {
+                        "type": "string"
+                      },
+                      "backend": {
+                        "type": "string"
+                      },
+                      "simulated": {
+                        "type": "boolean"
+                      },
+                      "scope": {
+                        "const": "backend_support"
+                      },
+                      "device_verified": {
+                        "const": false
+                      },
+                      "operations": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "properties": {
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "enabled": {
+                              "type": "boolean",
+                              "description": "Native config gate only; not policy, reachability or device permission."
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "supported",
+                            "enabled"
+                          ]
+                        }
+                      },
+                      "prerequisites": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "limitations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "protocol",
+                      "backend",
+                      "simulated",
+                      "scope",
+                      "device_verified",
+                      "operations",
+                      "prerequisites",
+                      "limitations"
+                    ]
+                  },
+                  "registry": {
+                    "type": "object",
+                    "description": "Observed Sparkplug cache and loss counters, not a complete broker inventory."
                   }
                 },
                 "required": [
@@ -685,7 +757,9 @@
                   "writes_enabled",
                   "subscriptions",
                   "buffered_messages",
-                  "sparkplug"
+                  "sparkplug",
+                  "capabilities",
+                  "registry"
                 ]
               }
             ]
@@ -769,7 +843,7 @@
     },
     {
       "name": "subscribe_topic",
-      "description": "Subscribe this server to an MQTT topic filter, so that matching messages are kept for read_messages. MQTT is publish/subscribe: nothing can be read from a topic until this server is subscribed to it, and only messages that arrive afterwards are seen, plus the topic's retained message, which the broker sends at once. Subscribe to 'spBv1.0/#' to discover Sparkplug B edge nodes with list_sparkplug_nodes. Succeeds only once the broker acknowledges (SUBACK); data.granted_qos is the QoS it granted. Subscriptions are restored automatically after a reconnect. This changes nothing that other clients see.",
+      "description": "Subscribe this server to an MQTT topic filter, so that matching messages are kept for read_messages. MQTT is publish/subscribe: nothing can be read from a topic until this server is subscribed to it, and only messages that arrive afterwards are seen, plus the topic's retained message, which the broker sends at once. Subscribe to 'spBv1.0/#' to discover Sparkplug B edge nodes with list_sparkplug_nodes. Succeeds only once the broker acknowledges (SUBACK); data.granted_qos is the QoS it granted. Subscriptions are restored automatically after a reconnect. Changes broker/client subscription state; special broker filters can affect other consumers. Explicit read_only policy denies this operation.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -909,14 +983,15 @@
         }
       },
       "annotations": {
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": true
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "destructiveHint": true
       }
     },
     {
       "name": "unsubscribe_topic",
-      "description": "Remove one of this server's subscriptions, named exactly as list_subscriptions shows it. Messages already buffered stay readable with read_messages. Fails with meta.code 'not_subscribed' if this server holds no subscription with that exact filter.",
+      "description": "Remove one of this server's subscriptions, named exactly as list_subscriptions shows it. Messages already buffered stay readable with read_messages. Fails with meta.code 'not_subscribed' if this server holds no subscription with that exact filter. Changes broker/client subscription state and is denied by explicit read_only policy.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1037,9 +1112,10 @@
         }
       },
       "annotations": {
-        "readOnlyHint": true,
-        "idempotentHint": true,
-        "openWorldHint": true
+        "readOnlyHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "destructiveHint": true
       }
     },
     {
@@ -1174,7 +1250,7 @@
     },
     {
       "name": "read_messages",
-      "description": "Return messages this server received on its subscriptions, oldest first. Only messages that arrived after subscribe_topic are available, and only the newest MQTT_MESSAGE_BUFFER_SIZE (default 1000) are kept. Each message has an increasing id, topic, qos, retain flag, received_at (UTC), payload (UTF-8 text, or hex for binary and Sparkplug payloads) and, for Sparkplug B topics, the decoded payload under 'sparkplug'.\n\nTo follow a topic, pass meta.last_id of the previous call as since_id. meta.has_more is true when more messages matched than limit allowed (with since_id, call again with the new meta.last_id for the rest). meta.missed_messages is true when messages after since_id were already pushed out of the buffer, and meta.dropped_total counts every message the buffer has pushed out. Does not contact the broker.",
+      "description": "Return messages this server received on its subscriptions, oldest first. Only messages that arrived after subscribe_topic are available, and only the newest MQTT_MESSAGE_BUFFER_SIZE (default 1000) are kept. Each message has an increasing id, topic, qos, retain flag, received_at (UTC), payload (UTF-8 text, or hex for binary and Sparkplug payloads) and, for Sparkplug B topics, the decoded payload under 'sparkplug'.\n\nTo follow a topic, pass meta.last_id of the previous call as since_id. meta.has_more is true when more messages matched than limit allowed (with since_id, call again with the new meta.last_id for the rest). meta.missed_messages is true when messages after since_id were already pushed out of the buffer, and meta.dropped_total counts every message the buffer has pushed out. Does not contact the broker. The inbox also has an 8 MiB serialized-content budget; byte-budget eviction increments dropped_total and reports missed_messages. Integer scalars outside +/-9007199254740991 are decimal strings; non-finite floating scalars are NaN/Infinity/-Infinity strings. Metrics carry value_encoding when converted.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1268,13 +1344,15 @@
                         "timestamp": {
                           "type": [
                             "integer",
-                            "null"
+                            "null",
+                            "string"
                           ]
                         },
                         "seq": {
                           "type": [
                             "integer",
-                            "null"
+                            "null",
+                            "string"
                           ]
                         },
                         "metrics": {
@@ -1297,10 +1375,16 @@
                               },
                               "value": {},
                               "alias": {
-                                "type": "integer"
+                                "type": [
+                                  "integer",
+                                  "string"
+                                ]
                               },
                               "timestamp": {
-                                "type": "integer"
+                                "type": [
+                                  "integer",
+                                  "string"
+                                ]
                               },
                               "is_null": {
                                 "type": "boolean"
@@ -1310,6 +1394,14 @@
                               },
                               "is_transient": {
                                 "type": "boolean"
+                              },
+                              "value_encoding": {
+                                "type": "string",
+                                "enum": [
+                                  "decimal",
+                                  "nonfinite"
+                                ],
+                                "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                               }
                             },
                             "required": [
@@ -1457,7 +1549,7 @@
     },
     {
       "name": "list_sparkplug_nodes",
-      "description": "List the Sparkplug B edge nodes and devices seen in messages this server received, with their online state, bdSeq and latest metric values. Each metric shows its Sparkplug datatype, which publish_sparkplug accepts as the metric type of a command. Discovery is passive: a node appears only after one of its NBIRTH, NDATA, NDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this server holds, so subscribe to 'spBv1.0/#' (or 'spBv1.0/<group>/#') first. Births are not retained, so a node born before the subscription shows up with its next data message; metrics that its data messages send without a datatype then show their raw stored value until the node is reborn. online is null when unknown, for example after this server reconnected. data.this_server is the edge node this server itself publishes as (publish_sparkplug). Does not contact the broker.",
+      "description": "List the Sparkplug B edge nodes and devices seen in messages this server received, with their online state, bdSeq and latest metric values. Each metric shows its Sparkplug datatype, which publish_sparkplug accepts as the metric type of a command. Discovery is passive: a node appears only after one of its NBIRTH, NDATA, NDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this server holds, so subscribe to 'spBv1.0/#' (or 'spBv1.0/<group>/#') first. Births are not retained, so a node born before the subscription shows up with its next data message; metrics that its data messages send without a datatype then show their raw stored value until the node is reborn. online is null when unknown, for example after this server reconnected. data.this_server is the edge node this server itself publishes as (publish_sparkplug). Does not contact the broker. The observed registry is bounded to 256 nodes and 4 MiB serialized state including alias tables. meta.registry reports eviction, decode rejection and connection gaps; it is not proof of a complete broker inventory. Integer scalars outside +/-9007199254740991 are decimal strings; non-finite floating scalars are NaN/Infinity/-Infinity strings. Metrics carry value_encoding when converted.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -1531,8 +1623,17 @@
                               "timestamp": {
                                 "type": [
                                   "integer",
-                                  "null"
+                                  "null",
+                                  "string"
                                 ]
+                              },
+                              "value_encoding": {
+                                "type": "string",
+                                "enum": [
+                                  "decimal",
+                                  "nonfinite"
+                                ],
+                                "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                               }
                             },
                             "required": [
@@ -1550,7 +1651,8 @@
                         "last_seq": {
                           "type": [
                             "integer",
-                            "null"
+                            "null",
+                            "string"
                           ]
                         },
                         "devices": {
@@ -1597,8 +1699,17 @@
                                     "timestamp": {
                                       "type": [
                                         "integer",
-                                        "null"
+                                        "null",
+                                        "string"
                                       ]
+                                    },
+                                    "value_encoding": {
+                                      "type": "string",
+                                      "enum": [
+                                        "decimal",
+                                        "nonfinite"
+                                      ],
+                                      "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                                     }
                                   },
                                   "required": [
@@ -1656,7 +1767,8 @@
                       "last_seq": {
                         "type": [
                           "integer",
-                          "null"
+                          "null",
+                          "string"
                         ]
                       },
                       "ndeath_will_registered": {
@@ -1777,7 +1889,7 @@
     },
     {
       "name": "decode_sparkplug_payload",
-      "description": "Decode a hex-encoded Sparkplug B protobuf payload into its timestamp, seq and metrics (name, alias, timestamp, datatype, value). read_messages already decodes Sparkplug topics under 'sparkplug'; use this for a payload from elsewhere. Signed integers are shown as signed numbers when the metric carries its datatype; a metric without one (allowed in DATA and CMD messages) shows its raw stored value. Protobuf cannot tell every other byte string apart, so success does not prove the bytes came from a Sparkplug node.",
+      "description": "Decode a hex-encoded Sparkplug B protobuf payload into its timestamp, seq and metrics (name, alias, timestamp, datatype, value). read_messages already decodes Sparkplug topics under 'sparkplug'; use this for a payload from elsewhere. Signed integers are shown as signed numbers when the metric carries its datatype; a metric without one (allowed in DATA and CMD messages) shows its raw stored value. Protobuf cannot tell every other byte string apart, so success does not prove the bytes came from a Sparkplug node. Decoded input is limited to 65536 bytes. Integer scalars outside +/-9007199254740991 are decimal strings; non-finite floating scalars are NaN/Infinity/-Infinity strings. Metrics carry value_encoding when converted.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1815,13 +1927,15 @@
                   "timestamp": {
                     "type": [
                       "integer",
-                      "null"
+                      "null",
+                      "string"
                     ]
                   },
                   "seq": {
                     "type": [
                       "integer",
-                      "null"
+                      "null",
+                      "string"
                     ]
                   },
                   "metrics": {
@@ -1844,10 +1958,16 @@
                         },
                         "value": {},
                         "alias": {
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "string"
+                          ]
                         },
                         "timestamp": {
-                          "type": "integer"
+                          "type": [
+                            "integer",
+                            "string"
+                          ]
                         },
                         "is_null": {
                           "type": "boolean"
@@ -1857,6 +1977,14 @@
                         },
                         "is_transient": {
                           "type": "boolean"
+                        },
+                        "value_encoding": {
+                          "type": "string",
+                          "enum": [
+                            "decimal",
+                            "nonfinite"
+                          ],
+                          "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                         }
                       },
                       "required": [
@@ -2633,7 +2761,8 @@
             "last_seq": {
               "type": [
                 "integer",
-                "null"
+                "null",
+                "string"
               ]
             },
             "ndeath_will_registered": {
@@ -2663,6 +2792,74 @@
             "devices_born",
             "node_lost"
           ]
+        },
+        "capabilities": {
+          "type": "object",
+          "properties": {
+            "protocol": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "simulated": {
+              "type": "boolean"
+            },
+            "scope": {
+              "const": "backend_support"
+            },
+            "device_verified": {
+              "const": false
+            },
+            "operations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "supported": {
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "type": "boolean",
+                    "description": "Native config gate only; not policy, reachability or device permission."
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "supported",
+                  "enabled"
+                ]
+              }
+            },
+            "prerequisites": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limitations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "protocol",
+            "backend",
+            "simulated",
+            "scope",
+            "device_verified",
+            "operations",
+            "prerequisites",
+            "limitations"
+          ]
+        },
+        "registry": {
+          "type": "object",
+          "description": "Observed Sparkplug cache and loss counters, not a complete broker inventory."
         }
       },
       "required": [
@@ -2676,7 +2873,9 @@
         "writes_enabled",
         "subscriptions",
         "buffered_messages",
-        "sparkplug"
+        "sparkplug",
+        "capabilities",
+        "registry"
       ]
     },
     "subscription": {
@@ -2774,13 +2973,15 @@
               "timestamp": {
                 "type": [
                   "integer",
-                  "null"
+                  "null",
+                  "string"
                 ]
               },
               "seq": {
                 "type": [
                   "integer",
-                  "null"
+                  "null",
+                  "string"
                 ]
               },
               "metrics": {
@@ -2803,10 +3004,16 @@
                     },
                     "value": {},
                     "alias": {
-                      "type": "integer"
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
                     },
                     "timestamp": {
-                      "type": "integer"
+                      "type": [
+                        "integer",
+                        "string"
+                      ]
                     },
                     "is_null": {
                       "type": "boolean"
@@ -2816,6 +3023,14 @@
                     },
                     "is_transient": {
                       "type": "boolean"
+                    },
+                    "value_encoding": {
+                      "type": "string",
+                      "enum": [
+                        "decimal",
+                        "nonfinite"
+                      ],
+                      "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                     }
                   },
                   "required": [
@@ -2904,8 +3119,17 @@
                     "timestamp": {
                       "type": [
                         "integer",
-                        "null"
+                        "null",
+                        "string"
                       ]
+                    },
+                    "value_encoding": {
+                      "type": "string",
+                      "enum": [
+                        "decimal",
+                        "nonfinite"
+                      ],
+                      "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                     }
                   },
                   "required": [
@@ -2923,7 +3147,8 @@
               "last_seq": {
                 "type": [
                   "integer",
-                  "null"
+                  "null",
+                  "string"
                 ]
               },
               "devices": {
@@ -2970,8 +3195,17 @@
                           "timestamp": {
                             "type": [
                               "integer",
-                              "null"
+                              "null",
+                              "string"
                             ]
+                          },
+                          "value_encoding": {
+                            "type": "string",
+                            "enum": [
+                              "decimal",
+                              "nonfinite"
+                            ],
+                            "description": "Present when a numeric scalar is encoded as a lossless JSON string."
                           }
                         },
                         "required": [
@@ -3029,7 +3263,8 @@
             "last_seq": {
               "type": [
                 "integer",
-                "null"
+                "null",
+                "string"
               ]
             },
             "ndeath_will_registered": {
@@ -3073,13 +3308,15 @@
         "timestamp": {
           "type": [
             "integer",
-            "null"
+            "null",
+            "string"
           ]
         },
         "seq": {
           "type": [
             "integer",
-            "null"
+            "null",
+            "string"
           ]
         },
         "metrics": {
@@ -3102,10 +3339,16 @@
               },
               "value": {},
               "alias": {
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "string"
+                ]
               },
               "timestamp": {
-                "type": "integer"
+                "type": [
+                  "integer",
+                  "string"
+                ]
               },
               "is_null": {
                 "type": "boolean"
@@ -3115,6 +3358,14 @@
               },
               "is_transient": {
                 "type": "boolean"
+              },
+              "value_encoding": {
+                "type": "string",
+                "enum": [
+                  "decimal",
+                  "nonfinite"
+                ],
+                "description": "Present when a numeric scalar is encoded as a lossless JSON string."
               }
             },
             "required": [
@@ -3186,7 +3437,10 @@
           "description": "What the success confirms about delivery."
         },
         "seq": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "string"
+          ],
           "description": "Sequence number (this server's own node only)."
         },
         "bd_seq": {

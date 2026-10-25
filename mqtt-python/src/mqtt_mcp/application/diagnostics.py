@@ -1,8 +1,10 @@
 from typing import Any
 
 from .. import sparkplug
+from ..domain.capabilities import capabilities
 from ..domain.model import _fail, _ok
 from ..domain.ports import MQTTSessionPort
+from ..inbox import MAX_SPARKPLUG_PAYLOAD
 
 
 def get_broker_info(ctx: MQTTSessionPort) -> dict[str, Any]:
@@ -15,6 +17,8 @@ def get_broker_info(ctx: MQTTSessionPort) -> dict[str, Any]:
     return _ok(
         {
             "broker": s.broker_url,
+            "capabilities": capabilities(s.writes_enabled),
+            "registry": m.registry.status(),
             "tls": s.tls,
             "tls_verification": not s.tls_insecure if s.tls else None,
             "client_id": s.client_id,
@@ -41,7 +45,7 @@ def list_sparkplug_nodes(ctx: MQTTSessionPort) -> dict[str, Any]:
     """List Sparkplug B edge nodes and devices seen in messages this server received."""
     m = ctx
     nodes = m.registry.snapshot()
-    meta: dict[str, Any] = {"count": len(nodes)}
+    meta: dict[str, Any] = {"count": len(nodes), "registry": m.registry.status()}
     if not any(t.startswith(("spBv1.0/", "#", "+/")) for t in m.subscriptions):
         meta["note"] = (
             "No subscription covers Sparkplug topics; subscribe to 'spBv1.0/#' to discover nodes."
@@ -62,6 +66,10 @@ def decode_sparkplug_payload(payload_hex: str) -> dict[str, Any]:
         return _fail(
             "payload_hex is not valid hex (expected pairs of 0-9a-f digits)",
             code="invalid_arguments",
+        )
+    if len(data) > MAX_SPARKPLUG_PAYLOAD:
+        return _fail(
+            "Sparkplug payload exceeds the decode limit", code="invalid_arguments", size=len(data)
         )
     try:
         decoded = sparkplug.decode_payload(data)

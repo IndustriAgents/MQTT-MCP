@@ -105,7 +105,9 @@ async def test_tool_list_and_annotations():
     assert set(tools) == READ_TOOLS | {"publish_message", "publish_sparkplug"}
     assert set(WRITE_TOOLS) == mqtt_server.WRITE_TOOLS  # the deadline's write list
     for name in READ_TOOLS:
-        assert tools[name].annotations.readOnlyHint is True, name
+        assert tools[name].annotations.readOnlyHint is (
+            name not in {"subscribe_topic", "unsubscribe_topic"}
+        ), name
     for name in ("publish_message", "publish_sparkplug"):
         tool = tools[name]
         assert tool.annotations.readOnlyHint is False, name

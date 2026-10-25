@@ -154,7 +154,14 @@ def test_every_type_roundtrips(type_name, value, datatype, field):
     assert pb.DataType.Name(metric.datatype) == datatype
     decoded = roundtrip({"name": "m", "value": value, "type": type_name})
     assert decoded["datatype"] == datatype
-    assert decoded["value"] == value
+    expected = (
+        str(value)
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > 2**53 - 1
+        else value
+    )
+    assert decoded["value"] == expected
+    if expected != value:
+        assert decoded["value_encoding"] == "decimal"
 
 
 def test_negative_int32_uses_32_bit_twos_complement():
@@ -283,3 +290,53 @@ def test_registry_forgets_online_state_when_this_server_loses_its_connection():
     registry.mark_unknown()  # deaths published while we were away are missed
     (node,) = registry.snapshot()
     assert node["online"] is None and node["devices"][0]["online"] is None
+
+
+@pytest.mark.parametrize(
+    "type_name,value",
+    [
+        ("int64", -(2**63)),
+        ("uint64", 2**64 - 1),
+        ("int64", 2**53),
+        ("int64", -(2**53)),
+        ("uint64", 2**53 - 1),
+    ],
+)
+def test_wide_integer_json_values_are_lossless(type_name, value):
+    import json
+
+    decoded = roundtrip({"name": "wide", "value": str(value), "type": type_name})
+    if abs(value) > 2**53 - 1:
+        assert decoded["value"] == str(value) and decoded["value_encoding"] == "decimal"
+    else:
+        assert decoded["value"] == value and "value_encoding" not in decoded
+    json.dumps(decoded, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [(float("nan"), "NaN"), (float("inf"), "Infinity"), (-float("inf"), "-Infinity")],
+)
+def test_nonfinite_received_values_have_explicit_encoding(value, expected):
+    import json
+
+    payload = pb.Payload(seq=1)
+    payload.metrics.add(name="bad", datatype=pb.Double, double_value=value)
+    metric = decode_payload(payload.SerializeToString())["metrics"][0]
+    assert metric["value"] == expected and metric["value_encoding"] == "nonfinite"
+    json.dumps(metric, allow_nan=False)
+
+
+def test_registry_preserves_wide_integer_encoding_after_alias_resolution():
+    from mqtt_mcp.inbox import SparkplugRegistry
+
+    registry = SparkplugRegistry()
+    birth = pb.Payload(seq=0)
+    birth.metrics.add(name="counter", alias=7, datatype=pb.UInt64, long_value=2**64 - 1)
+    registry.observe("spBv1.0/g/NBIRTH/n", birth.SerializeToString(), 0.0)
+    data = pb.Payload(seq=1)
+    data.metrics.add(alias=7, long_value=2**64 - 2)
+    decoded, _ = registry.observe("spBv1.0/g/NDATA/n", data.SerializeToString(), 1.0)
+    assert decoded["metrics"][0]["value"] == str(2**64 - 2)
+    metric = registry.snapshot()[0]["metrics"]["counter"]
+    assert metric["value"] == str(2**64 - 2) and metric["value_encoding"] == "decimal"

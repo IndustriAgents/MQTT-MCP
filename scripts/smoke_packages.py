@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -50,9 +51,20 @@ cmd = (
     if mode == "python"
     else ["node", "--", str(launcher)]
 )
-env = dict(os.environ)
+# Never inherit deployment endpoints, maps, credentials or policy into artifact checks.
+protocol_prefixes = ("BACNET_", "DNP3_", "MQTT_", "SPARKPLUG_", "MODBUS_", "S7_", "S7COMM_",
+                     "ENIP_", "ETHERNETIP_", "ETHERCAT_", "PROFIBUS_", "PROFINET_")
+env = {key: value for key, value in os.environ.items()
+       if not key.upper().startswith(protocol_prefixes) and not key.upper().endswith("_MAP_FILE")}
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as reservation:
+    reservation.bind(("127.0.0.1", 0))
+    bacnet_port = reservation.getsockname()[1]
 env.update(
     {
+        "BACNET_INTERFACE": "127.0.0.1",
+        "BACNET_PORT": str(bacnet_port),
+        "DNP3_HOST": "127.0.0.1",
+        "DNP3_PORT": "1",
         "ETHERCAT_BACKEND": "mock",
         "PROFINET_BACKEND": "none",
         "PROFIBUS_BACKEND": "mock",
@@ -140,7 +152,10 @@ try:
     contract = json.loads((repo / "contract/tools.json").read_text())
     assert [t["name"] for t in tools] == [t["name"] for t in contract["tools"]]
     for actual, expected in zip(tools, contract["tools"]):
-        assert actual["inputSchema"] == expected["inputSchema"]
+        for field in ("description", "inputSchema", "outputSchema"):
+            assert actual.get(field) == expected.get(field), (actual["name"], field)
+        for field, value in expected.get("annotations", {}).items():
+            assert actual.get("annotations", {}).get(field) == value, (actual["name"], field)
     route = next((name, r) for name, r in contract["routes"].items() if "selector" in r)
     send(
         {
@@ -155,7 +170,18 @@ try:
     )
     result = response(3)["result"]
     assert result["isError"] is True and result["structuredContent"]["success"] is False
-    print(repo.name, mode, "OK", len(tools), "tools", flush=True)
+    assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
+    send({"jsonrpc":"2.0", "id":4, "method":"tools/call",
+          "params":{"name":"get_broker_info", "arguments":{}}})
+    status = response(4)["result"]
+    observed = status["structuredContent"]
+    assert observed["success"] and not status.get("isError", False), status
+    assert json.loads(status["content"][0]["text"]) == observed
+    capabilities = observed["data"]["capabilities"]
+    assert capabilities["scope"] == "backend_support" and capabilities["device_verified"] is False
+    assert set(capabilities["operations"]) == {tool["name"] for tool in contract["tools"]}
+    assert capabilities["simulated"] is False
+    print(repo.name, mode, "OK", len(tools), "tools and capabilities", flush=True)
 finally:
     proc.stdin.close()
     try:

@@ -306,8 +306,9 @@ class MQTTClientManager:
         decoded, error = (None, None)
         try:
             decoded, error = self.registry.observe(msg.topic, msg.payload, received_at)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            self.registry.record_rejection()
+            error = "Sparkplug payload could not be processed"
         self.messages.add(
             msg.topic,
             bytes(msg.payload),
