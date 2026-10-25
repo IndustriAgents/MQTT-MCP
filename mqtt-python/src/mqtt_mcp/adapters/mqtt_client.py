@@ -10,6 +10,7 @@ import paho.mqtt.client as mqtt
 
 from .. import sparkplug
 from ..config import Settings
+from ..domain import limits
 from ..domain.model import UNKNOWN_HINT, PublishError, logger
 from ..inbox import MessageBuffer, SparkplugRegistry
 from ..infrastructure.control_context import SendState, _end_as_cancelled, _send_state
@@ -85,6 +86,11 @@ class MQTTClientManager:
         self._inflight: dict[int, _InFlight] = {}
         self._restart_task: asyncio.Task | None = None
         self.subscriptions: dict[str, int] = {}
+        self._reserved_subscriptions: set[str] = set()
+        self._uncertain_subscriptions: set[str] = set()
+        self._subscription_losses = 0
+        self._reserved_devices: set[str] = set()
+        self._uncertain_devices: set[str] = set()
         self._pending: dict[int, tuple[asyncio.Future | None, str, str]] = {}
         self.messages = MessageBuffer(settings.message_buffer_size)
         self.registry = SparkplugRegistry()
@@ -247,11 +253,19 @@ class MQTTClientManager:
             self.will_active = self._will_bd_seq is not None
             if self.will_active:
                 self.bd_seq = self._will_bd_seq
+            pending = [future for future, _, _ in self._pending.values() if future is not None]
+            self._clear_unconfirmed_subscriptions()
+            self._pending.clear()
             restore = dict(self.subscriptions)
             for topic, qos in restore.items():
                 result, mid = client.subscribe(topic, qos)
                 if result == mqtt.MQTT_ERR_SUCCESS and mid is not None:
                     self._pending[mid] = (None, "restore", topic)
+                else:
+                    self.subscriptions.pop(topic, None)
+                    self._subscription_losses += 1
+        for future in pending:
+            self._resolve(future, None)
         logger.info(
             "Connected to %s%s",
             self.settings.broker_url,
@@ -263,7 +277,10 @@ class MQTTClientManager:
             was_connected = self.connected
             self.connected = False
             pending = [future for future, _, _ in self._pending.values() if future is not None]
+            self._clear_unconfirmed_subscriptions()
             self._pending.clear()
+            self._reserved_devices.clear()
+            self._uncertain_devices.clear()
             for mid, flight in self._inflight.items():
                 if not flight.lost:
                     flight.withdrawn = self._withdraw(mid)
@@ -299,15 +316,16 @@ class MQTTClientManager:
                     ")"
                 )
         self.node_born = False
-        self.device_births.clear()
+        self.clear_device_births()
 
     def _on_message(self, client, userdata, msg) -> None:
         received_at = time.time()
         decoded, error = (None, None)
         try:
             decoded, error = self.registry.observe(msg.topic, msg.payload, received_at)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            self.registry.record_rejection()
+            error = "Sparkplug payload could not be processed"
         self.messages.add(
             msg.topic,
             bytes(msg.payload),
@@ -322,11 +340,19 @@ class MQTTClientManager:
         with self._lock:
             future, kind, topic = self._pending.pop(mid, (None, "", ""))
             if kind:
+                self._reserved_subscriptions.discard(topic)
                 refused = not reason_codes or reason_codes[0].is_failure
                 if refused:
-                    self.subscriptions.pop(topic, None)
                     if kind == "restore":
+                        self.subscriptions.pop(topic, None)
+                        self._subscription_losses += 1
                         logger.warning("Broker refused to restore subscription %s", topic)
+                    elif topic in self.subscriptions:
+                        # A rejected replacement cannot prove the old subscription
+                        # vanished. Keep its capacity until explicit cleanup.
+                        self.subscriptions.pop(topic)
+                        self._uncertain_subscriptions.add(topic)
+                        self._reserved_subscriptions.add(topic)
                 else:
                     self.subscriptions[topic] = int(reason_codes[0].value)
         if future is not None:
@@ -337,8 +363,123 @@ class MQTTClientManager:
             future, kind, topic = self._pending.pop(mid, (None, "", ""))
             if kind == "unsubscribe":
                 self.subscriptions.pop(topic, None)
+                self._reserved_subscriptions.discard(topic)
+                self._uncertain_subscriptions.discard(topic)
         if future is not None:
             self._resolve(future, list(reason_codes))
+
+    def _clear_unconfirmed_subscriptions(self) -> None:
+        """Clean sessions discard uncertain mutations; only confirmed state restores."""
+        uncertain = self._uncertain_subscriptions | {
+            topic for _, kind, topic in self._pending.values() if kind != "restore"
+        }
+        self._subscription_losses += len(uncertain)
+        for topic in uncertain:
+            self.subscriptions.pop(topic, None)
+        self._reserved_subscriptions.clear()
+        self._uncertain_subscriptions.clear()
+
+    def subscription_state(self) -> dict[str, Any]:
+        with self._lock:
+            topics = (
+                set(self.subscriptions)
+                | self._reserved_subscriptions
+                | self._uncertain_subscriptions
+            )
+            return {
+                "count": len(topics),
+                "encoded_bytes": sum(map(limits.subscription_bytes, topics)),
+                "max_count": limits.MAX_SUBSCRIPTIONS,
+                "max_bytes": limits.MAX_SUBSCRIPTION_BYTES,
+                "pending": len(self._pending),
+                "uncertain_topics": sorted(self._uncertain_subscriptions),
+                "lost_subscriptions": self._subscription_losses,
+            }
+
+    def _reserve_subscription(self, topic: str, kind: str) -> None:
+        if any(entry[2] == topic for entry in self._pending.values()):
+            raise PublishError(
+                "A subscription operation for this topic is still pending", code="resource_limit"
+            )
+        if kind != "subscribe":
+            if topic not in self.subscriptions and topic not in self._uncertain_subscriptions:
+                raise PublishError(
+                    "No known or uncertain subscription for this topic", code="not_subscribed"
+                )
+            return
+        if topic in self._uncertain_subscriptions:
+            raise PublishError(
+                "Subscription state is uncertain; explicitly unsubscribe or reconnect "
+                "before subscribing again",
+                code="resource_limit",
+            )
+        topics = (
+            set(self.subscriptions)
+            | self._reserved_subscriptions
+            | self._uncertain_subscriptions
+            | {topic}
+        )
+        if (
+            len(topics) > limits.MAX_SUBSCRIPTIONS
+            or sum(map(limits.subscription_bytes, topics)) > limits.MAX_SUBSCRIPTION_BYTES
+        ):
+            raise PublishError(
+                "Subscription count or encoded-byte capacity exhausted; "
+                "unsubscribe before adding topics",
+                code="resource_limit",
+            )
+        self._reserved_subscriptions.add(topic)
+
+    def reserve_device_birth(self, device_id: str) -> None:
+        # Called with sparkplug_lock held; callback lock also fences disconnect cleanup.
+        with self._lock:
+            if device_id in self._uncertain_devices:
+                raise PublishError(
+                    "Device birth is uncertain; publish device death or node birth before retrying",
+                    code="resource_limit",
+                )
+            devices = (
+                set(self.device_births)
+                | self._reserved_devices
+                | self._uncertain_devices
+                | {device_id}
+            )
+            if (
+                len(devices) > limits.MAX_PUBLISHER_DEVICES
+                or sum(map(limits.publisher_device_bytes, devices))
+                > limits.MAX_PUBLISHER_DEVICE_BYTES
+            ):
+                raise PublishError(
+                    "Publisher device count or encoded-byte capacity exhausted; "
+                    "publish device death first",
+                    code="resource_limit",
+                )
+            self._reserved_devices.add(device_id)
+
+    def release_device_birth(self, device_id: str, *, uncertain: bool = False) -> None:
+        with self._lock:
+            self._reserved_devices.discard(device_id)
+            if uncertain and self.connected:
+                self.device_births.pop(device_id, None)
+                self._uncertain_devices.add(device_id)
+
+    def clear_device_births(self) -> None:
+        with self._lock:
+            self.device_births.clear()
+            self._reserved_devices.clear()
+            self._uncertain_devices.clear()
+
+    def publisher_device_state(self) -> dict[str, Any]:
+        with self._lock:
+            devices = set(self.device_births) | self._reserved_devices | self._uncertain_devices
+            return {
+                "count": len(devices),
+                "pending": len(self._reserved_devices),
+                "uncertain_devices": sorted(self._uncertain_devices),
+                "encoded_bytes": sum(map(limits.publisher_device_bytes, devices)),
+                "max_count": limits.MAX_PUBLISHER_DEVICES,
+                "max_bytes": limits.MAX_PUBLISHER_DEVICE_BYTES,
+            }
 
     def _resolve(self, future: asyncio.Future, value: Any) -> None:
 
@@ -368,10 +509,23 @@ class MQTTClientManager:
                         "the call's deadline has passed; nothing was sent",
                         code="deadline_exceeded",
                     )
-                result, mid = call()
+                self._reserve_subscription(topic, kind)
+                try:
+                    result, mid = call()
+                except BaseException:
+                    # A failing native call can already have queued/sent the packet.
+                    # Hold bounded uncertainty until explicit cleanup or session loss.
+                    self._uncertain_subscriptions.add(topic)
+                    self._reserved_subscriptions.add(topic)
+                    if state is not None:
+                        state.sent = True
+                    raise
                 if result != mqtt.MQTT_ERR_SUCCESS or mid is None:
+                    self._reserved_subscriptions.discard(topic)
                     raise PublishError(f"the {kind} was not sent: {mqtt.error_string(result)}")
                 self._pending[mid] = (future, kind, topic)
+                if state is not None:
+                    state.sent = True
         if cancelled:
             await _end_as_cancelled(f"The {kind} was cancelled; nothing was sent")
         try:
@@ -389,6 +543,8 @@ class MQTTClientManager:
                 pending = self._pending.get(mid)
                 if pending is not None and pending[0] is future:
                     self._pending.pop(mid)
+                    self._uncertain_subscriptions.add(topic)
+                    self._reserved_subscriptions.add(topic)
         if reason_codes is None:
             raise PublishError(
                 f"the connection was lost before the broker acknowledged the {kind}",
@@ -403,7 +559,10 @@ class MQTTClientManager:
         codes = await self._await_ack(lambda: self.client.subscribe(topic, qos), "subscribe", topic)
         if not codes or codes[0].is_failure:
             raise PublishError(
-                f"the broker refused the subscription to {topic!r}", code="broker_refused"
+                f"the broker refused the subscription to {topic!r}",
+                code="broker_refused",
+                outcome="rejected",
+                request_sent=True,
             )
         return int(codes[0].value)
 

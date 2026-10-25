@@ -162,7 +162,7 @@ class EnvelopeFastMCP(FastMCP):
         return getattr(responder, "_cancel_scope", None)
 
     def _ended_early(self, name: str, state: SendState, why: str, code: str) -> dict[str, Any]:
-        if name not in WRITE_TOOLS:
+        if name not in WRITE_TOOLS | {"subscribe_topic", "unsubscribe_topic"}:
             return _fail(f"{name} {why}; nothing was changed", code=code, tool=name)
         if not state.sent or state.outcome == "not_sent":
             return _fail(

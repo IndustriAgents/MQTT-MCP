@@ -105,7 +105,9 @@ async def test_tool_list_and_annotations():
     assert set(tools) == READ_TOOLS | {"publish_message", "publish_sparkplug"}
     assert set(WRITE_TOOLS) == mqtt_server.WRITE_TOOLS  # the deadline's write list
     for name in READ_TOOLS:
-        assert tools[name].annotations.readOnlyHint is True, name
+        assert tools[name].annotations.readOnlyHint is (
+            name not in {"subscribe_topic", "unsubscribe_topic"}
+        ), name
     for name in ("publish_message", "publish_sparkplug"):
         tool = tools[name]
         assert tool.annotations.readOnlyHint is False, name
@@ -436,7 +438,7 @@ async def test_every_tool_call_has_an_overall_deadline(monkeypatch):
     assert write["meta"]["outcome"] == "not_sent" and write["meta"]["request_sent"] is False
     assert "deadline" in write["error"] and "will not be sent later" in write["error"]
     assert read["success"] is False and "deadline" in read["error"]
-    assert "outcome" not in read["meta"]
+    assert read["meta"]["outcome"] == "not_sent" and read["meta"]["request_sent"] is False
 
 
 async def test_deadline_after_the_hand_over_is_unknown(monkeypatch):

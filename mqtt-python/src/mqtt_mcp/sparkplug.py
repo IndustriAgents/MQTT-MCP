@@ -39,6 +39,7 @@ NODE_MESSAGE_TYPES = ("NBIRTH", "NDEATH", "NDATA", "NCMD")
 DEVICE_MESSAGE_TYPES = ("DBIRTH", "DDEATH", "DDATA", "DCMD")
 
 _FLOAT32_MAX = 3.4028234663852886e38
+MAX_SAFE_JSON_INTEGER = 2**53 - 1
 
 
 class MetricError(ValueError):
@@ -142,6 +143,11 @@ def resolve_type(type_name: Any) -> str:
 
 
 def _coerce_int(value: Any, type_key: str, spec: _TypeSpec) -> int:
+    if isinstance(value, str) and spec.field == "long_value":
+        digits = value[1:] if value.startswith("-") else value
+        if not digits or len(digits) > 20 or not digits.isascii() or not digits.isdecimal():
+            raise MetricError("64-bit integer strings must be plain decimal digits")
+        value = int(value)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MetricError(f"a {type_key} value must be an integer, got {value!r}")
     if isinstance(value, float):
@@ -314,6 +320,19 @@ def datatype_name(datatype: int | None) -> str | None:
         return f"Unknown({datatype})"
 
 
+def json_number(value: Any) -> Any:
+    """Lossless JSON scalar representation for clients using IEEE binary64 numbers."""
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and abs(value) > MAX_SAFE_JSON_INTEGER
+    ):
+        return str(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
+    return value
+
+
 def decode_metric(metric: pb.Payload.Metric, datatype: int | None = None) -> dict[str, Any]:
     own = metric.datatype if metric.HasField("datatype") else None
     effective = own if own is not None else datatype
@@ -322,10 +341,14 @@ def decode_metric(metric: pb.Payload.Metric, datatype: int | None = None) -> dic
         "datatype": datatype_name(effective),
         "value": metric_value(metric, effective),
     }
+    raw_value = out["value"]
+    out["value"] = json_number(raw_value)
+    if isinstance(out["value"], str) and not isinstance(raw_value, str):
+        out["value_encoding"] = "decimal" if isinstance(raw_value, int) else "nonfinite"
     if metric.HasField("alias"):
-        out["alias"] = metric.alias
+        out["alias"] = json_number(metric.alias)
     if metric.HasField("timestamp"):
-        out["timestamp"] = metric.timestamp
+        out["timestamp"] = json_number(metric.timestamp)
     if metric.is_null:
         out["is_null"] = True
     if metric.is_historical:
@@ -358,8 +381,8 @@ def decode_payload(data: bytes, known_datatypes: dict[str, int] | None = None) -
                 hint = known.get(f"alias:{metric.alias}")
         metrics.append(decode_metric(metric, hint))
     out: dict[str, Any] = {
-        "timestamp": payload.timestamp if payload.HasField("timestamp") else None,
-        "seq": payload.seq if payload.HasField("seq") else None,
+        "timestamp": json_number(payload.timestamp) if payload.HasField("timestamp") else None,
+        "seq": json_number(payload.seq) if payload.HasField("seq") else None,
         "metrics": metrics,
     }
     if payload.HasField("uuid"):

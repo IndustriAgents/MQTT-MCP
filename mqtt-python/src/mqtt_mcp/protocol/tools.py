@@ -6,7 +6,7 @@ from pydantic import StrictBool, StrictInt
 from ..application import diagnostics as diagnostics_operations
 from ..application import read as read_operations
 from ..application import write as write_operations
-from ..protocol.hints import _LOCAL, _READ, _WRITE, _metrics_doc
+from ..protocol.hints import _LOCAL, _WRITE, _metrics_doc
 
 
 def register_tools(mcp, context_for):
@@ -24,7 +24,7 @@ def register_tools(mcp, context_for):
         """
         return diagnostics_operations.get_broker_info(context_for(ctx))
 
-    @mcp.tool(annotations=_READ)
+    @mcp.tool(annotations=_WRITE)
     async def subscribe_topic(ctx: Context, topic: str, qos: StrictInt = 0) -> dict[str, Any]:
         """Subscribe this server to an MQTT topic filter so that matching messages are kept.
 
@@ -45,7 +45,7 @@ def register_tools(mcp, context_for):
         """
         return await read_operations.subscribe_topic(context_for(ctx), topic, qos)
 
-    @mcp.tool(annotations=_READ)
+    @mcp.tool(annotations=_WRITE)
     async def unsubscribe_topic(ctx: Context, topic: str) -> dict[str, Any]:
         """Remove one of this server's subscriptions (exactly as listed by list_subscriptions).
 

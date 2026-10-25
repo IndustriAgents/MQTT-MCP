@@ -8,6 +8,7 @@ process environment by default) when it is called, which ``main()`` does after
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 from collections.abc import Mapping
@@ -193,7 +194,7 @@ def _parse_number(env, name, default, kind, minimum, maximum=None):
         number = kind(value)
     except ValueError:
         raise ConfigError(f"{name}={value!r} is not a valid {kind.__name__}") from None
-    if number < minimum or (maximum is not None and number > maximum):
+    if not math.isfinite(number) or number < minimum or (maximum is not None and number > maximum):
         upper = f" and at most {maximum}" if maximum is not None else ""
         raise ConfigError(f"{name}={value!r} must be at least {minimum}{upper}")
     return number
@@ -211,26 +212,25 @@ def parse_broker_url(url: str) -> tuple[str, int, bool]:
     try:
         parts = urlsplit(raw)
         port = parts.port
-    except ValueError as exc:
-        raise ConfigError(f"MQTT_BROKER_URL={url!r} is not a valid URL: {exc}") from None
+    except ValueError:
+        raise ConfigError("MQTT_BROKER_URL is not a valid URL") from None
     scheme = parts.scheme.lower()
     if scheme not in DEFAULT_PORTS:
         raise ConfigError(
-            f"MQTT_BROKER_URL={url!r}: unsupported scheme {parts.scheme!r};"
-            " use mqtt:// (plain TCP) or mqtts:// (TLS)"
+            "MQTT_BROKER_URL: unsupported scheme; use mqtt:// (plain TCP) or mqtts:// (TLS)"
         )
     if parts.username is not None or parts.password is not None:
         raise ConfigError(
             "MQTT_BROKER_URL must not contain credentials; set MQTT_USERNAME and MQTT_PASSWORD"
         )
     if not parts.hostname:
-        raise ConfigError(f"MQTT_BROKER_URL={url!r} has no host")
+        raise ConfigError("MQTT_BROKER_URL has no host")
     if parts.path not in ("", "/") or parts.query or parts.fragment:
-        raise ConfigError(f"MQTT_BROKER_URL={url!r} must not have a path, query or fragment")
+        raise ConfigError("MQTT_BROKER_URL must not have a path, query or fragment")
     if port is None:
         port = DEFAULT_PORTS[scheme]
     if not 1 <= port <= 65535:
-        raise ConfigError(f"MQTT_BROKER_URL={url!r}: port must be between 1 and 65535")
+        raise ConfigError("MQTT_BROKER_URL: port must be between 1 and 65535")
     return parts.hostname, port, scheme == "mqtts"
 
 

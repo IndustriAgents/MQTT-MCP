@@ -36,7 +36,13 @@ async def subscribe_topic(ctx: MQTTSessionPort, topic: str, qos: StrictInt = 0) 
             )
         granted = await m.subscribe(topic, qos)
     except (ToolInputError, PublishError) as exc:
-        return _fail(f"Could not subscribe to {topic!r}: {exc}", code=error_code(exc), topic=topic)
+        return _fail(
+            f"Could not subscribe to {topic!r}: {exc}",
+            code=error_code(exc),
+            topic=topic,
+            outcome=getattr(exc, "outcome", "not_sent"),
+            request_sent=getattr(exc, "request_sent", False),
+        )
     return _ok({"topic": topic, "granted_qos": granted}, requested_qos=qos)
 
 
@@ -45,7 +51,7 @@ async def unsubscribe_topic(ctx: MQTTSessionPort, topic: str) -> dict[str, Any]:
     m = ctx
     try:
         topic = _check_topic_filter(topic)
-        if topic not in m.subscriptions:
+        if topic not in m.subscriptions and topic not in m._uncertain_subscriptions:
             raise ToolInputError(
                 "this server holds no subscription to "
                 f"{topic!r}"
@@ -57,7 +63,11 @@ async def unsubscribe_topic(ctx: MQTTSessionPort, topic: str) -> dict[str, Any]:
         await m.unsubscribe(topic)
     except (ToolInputError, PublishError) as exc:
         return _fail(
-            f"Could not unsubscribe from {topic!r}: {exc}", code=error_code(exc), topic=topic
+            f"Could not unsubscribe from {topic!r}: {exc}",
+            code=error_code(exc),
+            topic=topic,
+            outcome=getattr(exc, "outcome", "not_sent"),
+            request_sent=getattr(exc, "request_sent", False),
         )
     return _ok({"topic": topic, "unsubscribed": True})
 

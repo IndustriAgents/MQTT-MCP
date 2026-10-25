@@ -174,9 +174,16 @@ async def publish_node_birth(
                 )
             extra = [sparkplug.bd_seq_metric(m.bd_seq), sparkplug.rebirth_metric()]
             data = await _publish_edge(m, "NBIRTH", metrics, extra=extra, seq_mode="zero")
-            m.node_born = True
-            m.node_lost = None
-            m.device_births.clear()
+            with m._lock:
+                if not m.connected or not m.will_active or m.generation != data["generation"]:
+                    raise PublishError(
+                        "Connection changed after NBIRTH; state is unknown",
+                        outcome="unknown",
+                        request_sent=True,
+                    )
+                m.node_born = True
+                m.node_lost = None
+                m.clear_device_births()
     except (ToolInputError, sparkplug.MetricError, PublishError) as exc:
         return _edge_failure("NBIRTH", exc)
     return _written(data, reconnected_with_will=reconnected)
@@ -198,7 +205,7 @@ async def publish_node_death(ctx: MQTTSessionPort) -> dict[str, Any]:
             bd_seq = m.bd_seq
             result = await m.publish(topic, payload, qos=1)
             m.node_born = False
-            m.device_births.clear()
+            m.clear_device_births()
             try:
                 await m.restart_session(None)
             except PublishError as exc:
@@ -225,8 +232,32 @@ async def publish_device_birth(
                 raise ToolInputError(
                     "publish_node_birth first: the edge node is not born", code="not_born"
                 )
-            data = await _publish_edge(m, "DBIRTH", metrics, device_id)
-            m.device_births[device_id] = {"born_at_seq": data["seq"]}
+            m.reserve_device_birth(device_id)
+            uncertain = False
+            generation = m.generation
+            try:
+                data = await _publish_edge(m, "DBIRTH", metrics, device_id)
+                with m._lock:
+                    # A native disconnect callback may run between acknowledgement
+                    # and this commit; never resurrect an obsolete session's birth.
+                    if not m.connected or not m.will_active or m.generation != data["generation"]:
+                        raise PublishError(
+                            "Connection changed after DBIRTH; state is unknown",
+                            outcome="unknown",
+                            request_sent=True,
+                        )
+                    m.device_births[device_id] = {"born_at_seq": data["seq"]}
+            except BaseException as exc:
+                state = _send_state.get()
+                uncertain = (isinstance(exc, PublishError) and exc.outcome == "unknown") or (
+                    not isinstance(exc, (PublishError, ToolInputError, sparkplug.MetricError))
+                    and (state is None or (state.sent and state.outcome != "not_sent"))
+                )
+                raise
+            finally:
+                m.release_device_birth(
+                    device_id, uncertain=uncertain and m.generation == generation
+                )
     except (ToolInputError, sparkplug.MetricError, PublishError) as exc:
         return _edge_failure("DBIRTH", exc, device_id=device_id)
     return _written(data, device_id=device_id)
@@ -240,12 +271,16 @@ async def publish_device_death(ctx: MQTTSessionPort, device_id: str) -> dict[str
     try:
         device_id = _check_id(device_id, "device_id")
         async with m.sparkplug_lock:
-            if not m.node_born or device_id not in m.device_births:
+            if not m.node_born or (
+                device_id not in m.device_births and device_id not in m._uncertain_devices
+            ):
                 raise ToolInputError(
                     f"device {device_id!r} has no DBIRTH from this server", code="not_born"
                 )
             data = await _publish_edge(m, "DDEATH", [], device_id)
-            m.device_births.pop(device_id, None)
+            with m._lock:
+                m.device_births.pop(device_id, None)
+                m._uncertain_devices.discard(device_id)
     except (ToolInputError, PublishError) as exc:
         return _edge_failure("DDEATH", exc, device_id=device_id)
     return _written(data, device_id=device_id)

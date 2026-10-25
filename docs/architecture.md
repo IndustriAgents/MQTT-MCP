@@ -47,8 +47,8 @@ TypeScript implementation: npm carries the same wheel as the PyPI release.
 |---|---|---|
 | `publish_sparkplug` | `NBIRTH`, `NDEATH`, `DBIRTH`, `DDEATH`, `NDATA`, `DDATA`, `NCMD`, `DCMD` | Changes state or consumes events |
 | `get_broker_info` | No mode selector | Read/local |
-| `subscribe_topic` | No mode selector | Read/local |
-| `unsubscribe_topic` | No mode selector | Read/local |
+| `subscribe_topic` | No mode selector | Changes broker/client subscription state |
+| `unsubscribe_topic` | No mode selector | Changes broker/client subscription state |
 | `list_subscriptions` | No mode selector | Read/local |
 | `read_messages` | No mode selector | Read/local |
 | `list_sparkplug_nodes` | No mode selector | Read/local |
@@ -202,3 +202,11 @@ consolidated routes, unknown/mixed arguments, legacy-policy bypass, independent
 admission state, durable intent failure and MCP error envelopes. npm tests
 check the bundled version, argument boundaries, exit status and missing-uv
 errors. See [release.md](release.md) for the registry workflow.
+
+## Protocol capability review
+
+The [protocol research and capability matrix](protocol-research.md) records the
+2026-10-25 source review and supported scope. All canonical tools declare concrete
+data shapes in `contract/tools.json`; MCP tests validate actual results. Existing
+local diagnostics now expose backend support separately from native enablement
+and device verification. See the matrix for policy migration details.

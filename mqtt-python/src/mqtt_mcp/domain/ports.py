@@ -9,6 +9,8 @@ class MQTTSessionPort(Protocol):
     _lock: Any
     _loop: Any
     _next_bd_seq: Any
+    _uncertain_devices: Any
+    _uncertain_subscriptions: Any
     _pending: Any
     _restart_task: Any
     _will_bd_seq: Any
@@ -29,6 +31,16 @@ class MQTTSessionPort(Protocol):
     sparkplug_lock: Any
     subscriptions: Any
     will_active: Any
+
+    def subscription_state(self) -> dict: ...
+
+    def publisher_device_state(self) -> dict: ...
+
+    def reserve_device_birth(self, device_id: str) -> None: ...
+
+    def release_device_birth(self, device_id: str, *, uncertain: bool = False) -> None: ...
+
+    def clear_device_births(self) -> None: ...
 
     async def start(self) -> Any: ...
 

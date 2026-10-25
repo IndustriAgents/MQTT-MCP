@@ -188,8 +188,8 @@ Every tool call has **one deadline**, `MQTT_TOOL_TIMEOUT` (default 10 s, at most
 | Tool | Kind | What it does |
 |------|------|--------------|
 | `get_broker_info` | read | Connection state, last error, TLS, client ID, write gate, subscriptions, this server's Sparkplug state |
-| `subscribe_topic` | read | Subscribe to a topic filter (success after the broker's SUBACK) |
-| `unsubscribe_topic` | read | Remove one of this server's subscriptions |
+| `subscribe_topic` | changes subscription | Subscribe to a topic filter (success after the broker's SUBACK) |
+| `unsubscribe_topic` | changes subscription | Remove one of this server's subscriptions |
 | `list_subscriptions` | read | The subscriptions this server holds, with granted QoS |
 | `read_messages` | read | Messages received on the subscriptions (the newest, or those after an id); Sparkplug payloads decoded |
 | `list_sparkplug_nodes` | read | Edge nodes and devices seen in received Sparkplug messages |
@@ -202,7 +202,7 @@ Every tool call has **one deadline**, `MQTT_TOOL_TIMEOUT` (default 10 s, at most
 
 ### Read-only by default
 
-The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscribing and reading are not writes: they change nothing that other clients see. The exceptions are broker extensions in filters that start with `$` (other than `$SYS/`): shared subscriptions (`$share/...`, `$queue/...`) take messages away from the other members of the share group, and exclusive ones (`$exclusive/...`) lock other clients out of a topic, so they are refused while writes are disabled.
+The write tools are listed so that an agent can see them, but each returns `success: false` with `Writes are disabled ...` and publishes nothing unless `MQTT_WRITES_ENABLED=true`. Every publish counts as a write, not only the Sparkplug commands: MQTT has no difference between data and commands, any topic can be subscribed by something that acts on it (relays, PLC gateways, other agents), a retained message stays on the broker for every future subscriber, and Sparkplug births, data and deaths published by this server change what host applications such as SCADA show and record. Subscriptions mutate broker/client state and advertise `readOnlyHint:false`; explicit deployment policy `read_only:true` blocks subscribe/unsubscribe. Monitoring can allow those operations with `read_only:false` while leaving publishing disabled. Buffered reads and local listings remain read-only. The native write gate additionally protects broker extensions in filters that start with `$` (other than `$SYS/`): shared subscriptions (`$share/...`, `$queue/...`) take messages away from the other members of the share group, and exclusive ones (`$exclusive/...`) lock other clients out of a topic, so they are refused while writes are disabled.
 
 `MQTT_WRITES_ENABLED` counts only when it comes from the server's real environment (for example the `env` block of your MCP client configuration) or from a file passed explicitly with `--env-file`. The only `.env` the server loads by itself is `mqtt-python/.env` of a source checkout, found next to the package source; it never reads a `.env` from its working directory or any parent, because when an MCP client launches the server directly, the working directory is the client's project, which may not be trusted (and settings such as the broker decide where a write goes). An installed package has no automatic `.env` at all. Even `mqtt-python/.env` may set only `MQTT_*` and `SPARKPLUG_*` variables and cannot enable writes: `MQTT_WRITES_ENABLED` in it (matched in any letter case and with or without `export `, since Windows upper-cases environment names) and any other variable (`PATH`, `PYTHONPATH`, `LD_PRELOAD`, ...) are ignored with a warning on stderr.
 
@@ -357,10 +357,15 @@ The metric `type` values the publish tools accept (case-insensitive):
 
 `value: null` sends a null metric. Anything else (an unknown type, a value of the wrong kind or out of range) is rejected with `success: false` and nothing is sent. Signed integers are written as their 32-bit (Int8/16/32) or 64-bit (Int64) two's complement, as the Java/C# Sparkplug libraries do; when decoding, both that form and the narrower form some libraries write are read back as the right negative number.
 
+Decoded scalar integers outside ±9007199254740991 use decimal strings with
+`value_encoding:"decimal"`; non-finite floats use `NaN`/`Infinity`/`-Infinity`
+with `value_encoding:"nonfinite"`. Wide timestamp/alias/sequence fields also use
+strings. Publishing int64/uint64/datetime accepts plain decimal strings.
+
 ## Known limitations
 
 - **MQTT 3.1.1 only**, over TCP or TLS. No MQTT 5 features and no WebSocket transport.
-- **Messages are only what the server has received.** `read_messages` holds the newest `MQTT_MESSAGE_BUFFER_SIZE` messages that arrived on its subscriptions since it started (clean session: nothing is queued for it while it is offline). Older messages are dropped and counted in `meta.dropped_total`.
+- **Messages are only what the server has received.** `read_messages` holds the newest `MQTT_MESSAGE_BUFFER_SIZE` messages that arrived on its subscriptions since it started (clean session: nothing is queued for it while it is offline). Retention is also bounded to 8 MiB of serialized content including decoded metadata. Evicted or oversized messages are counted in `meta.dropped_total`; `meta.missed_messages` flags known loss after a requested ID. Sparkplug decode is capped at 64 KiB per payload and the registry at 256 nodes / 4 MiB, with evictions, rejected payloads and connection gaps exposed in diagnostics. Caller-created subscriptions also share a 256-entry / 256 KiB encoded-state budget; publisher devices share 256 entries / 64 KiB. Pending and uncertain identities count toward those budgets. Diagnostics expose uncertainty; explicit unsubscribe/device death clears it. Uncertain mutations are never automatically replayed, and clean-session reconnect restores only acknowledged subscriptions.
 - **Discovery is passive.** `list_sparkplug_nodes` only knows nodes whose messages arrived on a subscription. Births are not retained, so a node born before the subscription appears with its next NDATA/DDATA; metrics that its data messages send without a datatype (allowed by Sparkplug) then show their raw stored value until the node is reborn. A read-only server cannot ask for a rebirth.
 - **The server as an edge node is minimal.** It does not act on NCMD/DCMD sent to its own edge node, including `Node Control/Rebirth`, and after an unexpected disconnect (when the broker has published its NDEATH will) it does not rebirth by itself: call `publish_node_birth` again. It publishes no aliases, properties, templates, datasets or arrays.
 - **Sparkplug host features are not implemented**: no `STATE` (Primary Host) messages, no sequence-gap detection or automatic rebirth requests for other nodes.
@@ -513,3 +518,9 @@ MIT, see [LICENSE](LICENSE).
 - [MCP Documentation](https://modelcontextprotocol.io/)
 - [paho-mqtt Python Library](https://github.com/eclipse-paho/paho.mqtt.python)
 - [Eclipse Tahu Sparkplug Libraries](https://github.com/eclipse-tahu/tahu)
+
+## Protocol support and verification
+
+See [protocol research and capability matrix](docs/protocol-research.md) for source evidence,
+implemented tool coverage, policy changes, test requirements and remaining limitations.
+The local status tool exposes `capabilities`; backend support does not establish device permission or reachability.
