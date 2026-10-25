@@ -26,8 +26,7 @@ def metrics_of(decoded: dict) -> dict:
 
 
 async def test_read_only_server_against_the_mock(broker, mock_node, observer, tmp_path):
-    mock = mock_node()
-    group = mock.group_id
+    group = unique("itest")
     async with mcp_session(
         tmp_path,
         MQTT_BROKER_URL=broker.url,
@@ -47,6 +46,10 @@ async def test_read_only_server_against_the_mock(broker, mock_node, observer, tm
         listed = await call(session, "list_subscriptions")
         assert listed["data"] == [{"topic": f"spBv1.0/{group}/#", "qos": 1}]
 
+        # Subscribe before birth: an observer that missed NBIRTH cannot correlate
+        # a later NDEATH to a known Sparkplug session.
+        mock = mock_node(group_id=group)
+
         # Passive discovery of the mock's node and devices from broker traffic.
         async def discovered():
             nodes = (await call(session, "list_sparkplug_nodes"))["data"]["nodes"]
@@ -60,6 +63,7 @@ async def test_read_only_server_against_the_mock(broker, mock_node, observer, tm
             "edge-node-1",
             True,
         )
+        assert node["bd_seq"] == 0
         sensors = node["devices"][0]
         assert sensors["device_id"] == "device-1"
         assert sensors["metrics"]["temperature"]["datatype"] == "Float"

@@ -94,3 +94,33 @@ strings when needed. Native integer datatype information is retained.
 Publishers may send plain decimal strings for int64, uint64 and datetime to avoid
 JSON-client rounding. Other integer types keep their existing strict numeric
 validation. Tests cover direct decoding and birth-derived alias updates.
+
+## Second review: observation integrity (2026-10-25)
+
+[Sparkplug 3.0 sections 6.4.2 and 6.4.24–25](https://sparkplug.eclipse.org/specification/version/3.0/documents/sparkplug-specification-3.0.0.pdf)
+distinguish historical/transient samples from current retained tags, use an
+edge-node-wide sequence across node/device traffic, and correlate deaths by
+birth/death sequence. Historical/transient samples previously overwrote our
+current registry values; an unmatched death changed last-seen/type/sequence
+metadata before being ignored.
+
+Historical/transient samples now remain decoded in the inbox without replacing
+current metrics; current null values retain `is_null`. Unmatched NDEATH is ignored
+before any registry mutation, including LRU or diagnostic fields. A matching
+birth is required; NDEATH never advances the data sequence. Sequence diagnostics
+cover NBIRTH/DBIRTH/NDATA/DDATA/DDEATH, modulo-256 wrap, invalid fields and birth
+reset. The stricter topic rule `tck-id-topics-nbirth-seq-num` requires NBIRTH
+sequence zero (PDF page 27), even though the general payload section permits
+0–255: nonzero births are diagnosed as invalid and cannot anchor continuity. A discontinuity reports expected/received values, without guessing lost
+message counts or distinguishing network loss from duplication/reordering.
+Values retain arrival order; no automatic rebirth command is sent. Cumulative
+known discontinuities make observation completeness false. New tests cover these
+semantics, including a byte-for-byte unchanged snapshot after stale deaths.
+
+Prioritized remaining roadmap:
+
+1. Expose birth-derived metadata freshness explicitly after missing births/reconnects.
+2. Implement an opt-in ordered host/rebirth workflow with bounded reordering windows.
+3. Expand complex metric publishing and run the Sparkplug TCK before conformance claims.
+
+This remains a passive observation subset, not a full Sparkplug host state machine.

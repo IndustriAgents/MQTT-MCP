@@ -1634,7 +1634,7 @@
     },
     {
       "name": "list_sparkplug_nodes",
-      "description": "List the Sparkplug B edge nodes and devices seen in messages this server received, with their online state, bdSeq and latest metric values. Each metric shows its Sparkplug datatype, which publish_sparkplug accepts as the metric type of a command. Discovery is passive: a node appears only after one of its NBIRTH, NDATA, NDEATH, DBIRTH, DDATA or DDEATH messages arrives on a subscription this server holds, so subscribe to 'spBv1.0/#' (or 'spBv1.0/<group>/#') first. Births are not retained, so a node born before the subscription shows up with its next data message; metrics that its data messages send without a datatype then show their raw stored value until the node is reborn. online is null when unknown, for example after this server reconnected. data.this_server is the edge node this server itself publishes as (publish_sparkplug). Does not contact the broker. The observed registry is bounded to 256 nodes and 4 MiB serialized state including alias tables. meta.registry reports eviction, decode rejection and connection gaps; it is not proof of a complete broker inventory. Integer scalars outside +/-9007199254740991 are decimal strings; non-finite floating scalars are NaN/Infinity/-Infinity strings. Metrics carry value_encoding when converted.",
+      "description": "List the Sparkplug B edge nodes and devices seen in messages this server received, with their online state, bdSeq and latest metric values. Each metric shows its Sparkplug datatype, which publish_sparkplug accepts as the metric type of a command. Discovery is passive: a node appears only after one of its NBIRTH, NDATA, DBIRTH, DDATA or DDEATH messages arrives on a subscription this server holds, so subscribe to 'spBv1.0/#' (or 'spBv1.0/<group>/#') first. Births are not retained, so a node born before the subscription shows up with its next data message; metrics that its data messages send without a datatype then show their raw stored value until the node is reborn. online is null when unknown, for example after this server reconnected. data.this_server is the edge node this server itself publishes as (publish_sparkplug). Does not contact the broker. The observed registry is bounded to 256 nodes and 4 MiB serialized state including alias tables. meta.registry reports eviction, decode rejection and connection gaps; it is not proof of a complete broker inventory. Integer scalars outside +/-9007199254740991 are decimal strings; non-finite floating scalars are NaN/Infinity/-Infinity strings. Metrics carry value_encoding when converted. Retained metric values exclude historical and transient samples (these remain in read_messages). Sequence diagnostics require a zero NBIRTH anchor, span node and device messages with modulo-256 wrap, and signal observed discontinuity without guessing whether delivery was lost, duplicated or reordered. Unmatched death certificates never update registry state; no automatic rebirth request is sent.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -1719,6 +1719,9 @@
                                   "nonfinite"
                                 ],
                                 "description": "Present when a numeric scalar is encoded as a lossless JSON string."
+                              },
+                              "is_null": {
+                                "type": "boolean"
                               }
                             },
                             "required": [
@@ -1795,6 +1798,9 @@
                                         "nonfinite"
                                       ],
                                       "description": "Present when a numeric scalar is encoded as a lossless JSON string."
+                                    },
+                                    "is_null": {
+                                      "type": "boolean"
                                     }
                                   },
                                   "required": [
@@ -1815,6 +1821,54 @@
                         },
                         "stale_ndeath_ignored": {
                           "type": "boolean"
+                        },
+                        "sequence_status": {
+                          "enum": [
+                            "unknown",
+                            "reset",
+                            "unanchored",
+                            "in_order",
+                            "discontinuity",
+                            "invalid"
+                          ]
+                        },
+                        "sequence_discontinuities": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "last_sequence_issue": {
+                          "type": [
+                            "object",
+                            "null"
+                          ],
+                          "properties": {
+                            "reason": {
+                              "enum": [
+                                "missing_or_invalid",
+                                "repeated_sequence",
+                                "unexpected_sequence",
+                                "nonzero_birth"
+                              ]
+                            },
+                            "expected": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "received": {
+                              "type": [
+                                "integer",
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "reason",
+                            "expected",
+                            "received"
+                          ]
                         }
                       },
                       "required": [
@@ -1826,7 +1880,10 @@
                         "metrics",
                         "bd_seq",
                         "last_seq",
-                        "devices"
+                        "devices",
+                        "sequence_status",
+                        "sequence_discontinuities",
+                        "last_sequence_issue"
                       ]
                     }
                   },
@@ -3300,6 +3357,9 @@
                         "nonfinite"
                       ],
                       "description": "Present when a numeric scalar is encoded as a lossless JSON string."
+                    },
+                    "is_null": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -3376,6 +3436,9 @@
                               "nonfinite"
                             ],
                             "description": "Present when a numeric scalar is encoded as a lossless JSON string."
+                          },
+                          "is_null": {
+                            "type": "boolean"
                           }
                         },
                         "required": [
@@ -3396,6 +3459,54 @@
               },
               "stale_ndeath_ignored": {
                 "type": "boolean"
+              },
+              "sequence_status": {
+                "enum": [
+                  "unknown",
+                  "reset",
+                  "unanchored",
+                  "in_order",
+                  "discontinuity",
+                  "invalid"
+                ]
+              },
+              "sequence_discontinuities": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "last_sequence_issue": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "missing_or_invalid",
+                      "repeated_sequence",
+                      "unexpected_sequence",
+                      "nonzero_birth"
+                    ]
+                  },
+                  "expected": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "received": {
+                    "type": [
+                      "integer",
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "reason",
+                  "expected",
+                  "received"
+                ]
               }
             },
             "required": [
@@ -3407,7 +3518,10 @@
               "metrics",
               "bd_seq",
               "last_seq",
-              "devices"
+              "devices",
+              "sequence_status",
+              "sequence_discontinuities",
+              "last_sequence_issue"
             ]
           }
         },
