@@ -210,3 +210,7 @@ The [protocol research and capability matrix](protocol-research.md) records the
 data shapes in `contract/tools.json`; MCP tests validate actual results. Existing
 local diagnostics now expose backend support separately from native enablement
 and device verification. See the matrix for policy migration details.
+
+## Observation integrity review
+
+The observed Sparkplug registry distinguishes historical/transient samples from current values, fences unmatched deaths, and reports edge-wide sequence discontinuities. See [protocol research](protocol-research.md) for evidence, limits and the prioritized roadmap.

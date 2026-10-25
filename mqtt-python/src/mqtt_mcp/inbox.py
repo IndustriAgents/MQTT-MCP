@@ -206,6 +206,8 @@ class SparkplugRegistry:
         self.evicted_nodes = 0
         self.rejected_payloads = 0
         self.connection_gaps = 0
+        self.sequence_discontinuities = 0
+        self.invalid_sequences = 0
 
     def observe(
         self, topic: str, payload: bytes, received_at: float
@@ -236,6 +238,12 @@ class SparkplugRegistry:
 
         with self._lock:
             node = self._nodes.get(node_key)
+            if message_type == "NDEATH":
+                # Correlate before changing even last_seen, sequence or LRU order.
+                # An old will can arrive after a newer birth on another connection.
+                death_seq = _bd_seq(decoded)
+                if node is None or death_seq is None or node["bd_seq"] != death_seq:
+                    return decoded, "Unmatched NDEATH ignored; no current matching NBIRTH"
             if node is None:
                 node = _new_entity()
                 node.update(
@@ -244,6 +252,9 @@ class SparkplugRegistry:
                         "edge_node_id": node_key[1],
                         "bd_seq": None,
                         "last_seq": None,
+                        "sequence_status": "unknown",
+                        "sequence_discontinuities": 0,
+                        "last_sequence_issue": None,
                         "devices": {},
                     }
                 )
@@ -258,8 +269,8 @@ class SparkplugRegistry:
                     node["devices"][device_id] = entity
             entity["last_message_type"] = message_type
             entity["last_seen"] = _iso(received_at)
-            if decoded.get("seq") is not None:
-                node["last_seq"] = decoded["seq"]
+            if message_type != "NDEATH":
+                self._observe_sequence(node, decoded.get("seq"), birth=message_type == "NBIRTH")
 
             if message_type in ("NBIRTH", "DBIRTH"):
                 types = _Datatypes()
@@ -283,12 +294,6 @@ class SparkplugRegistry:
                     for key in [k for k in self._types if k[:2] == node_key and len(k) == 3]:
                         del self._types[key]
             elif message_type == "NDEATH":
-                bd_seq = _bd_seq(decoded)
-                if node["bd_seq"] is not None and bd_seq is not None and bd_seq != node["bd_seq"]:
-                    # A stale death certificate from an earlier session (spec: ignore it).
-                    entity["stale_ndeath_ignored"] = True
-                    self._bound_node(node_key)
-                    return decoded, None
                 node["online"] = False
                 for device in node["devices"].values():
                     device["online"] = False
@@ -302,6 +307,10 @@ class SparkplugRegistry:
             if message_type != "NDEATH":
                 aliases = self._types.get(type_key, _Datatypes()).alias_names
                 for metric in decoded["metrics"]:
+                    # Historical/store-forward and transient samples stay in the
+                    # inbox but must not replace or create retained current tags.
+                    if metric.get("is_historical") or metric.get("is_transient"):
+                        continue
                     name = metric["name"]
                     if name is None and "alias" in metric:
                         name = aliases.get(metric["alias"], f"alias:{metric['alias']}")
@@ -312,14 +321,56 @@ class SparkplugRegistry:
                         "datatype": metric["datatype"],
                         "timestamp": metric.get("timestamp"),
                     }
-                    if "value_encoding" in metric:
-                        entity["metrics"][name]["value_encoding"] = metric["value_encoding"]
+                    for flag in ("value_encoding", "is_null"):
+                        if flag in metric:
+                            entity["metrics"][name][flag] = metric[flag]
             if not self._bound_node(node_key):
                 return (
                     decoded,
                     "Sparkplug node exceeds registry byte limit; cached node was removed",
                 )
         return decoded, None
+
+    def _observe_sequence(self, node: dict[str, Any], seq: Any, *, birth: bool) -> None:
+        """Report observed continuity; gaps, replay and reordering are not distinguishable."""
+        previous = node["last_seq"]
+        expected = None if previous is None else (previous + 1) % 256
+        if birth:
+            node["sequence_discontinuities"] = 0
+            node["last_sequence_issue"] = None
+            node["last_seq"] = None
+            expected = 0
+        nonzero_birth = birth and isinstance(seq, int) and 0 < seq <= 255
+        if (
+            not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or not 0 <= seq <= 255
+            or nonzero_birth
+        ):
+            self.invalid_sequences += 1
+            node["sequence_status"] = "invalid"
+            node["last_sequence_issue"] = {
+                "reason": "nonzero_birth" if nonzero_birth else "missing_or_invalid",
+                "expected": expected,
+                "received": str(seq) if isinstance(seq, int) and abs(seq) > 2**53 - 1 else seq,
+            }
+            return
+        if birth or expected is None:
+            node["sequence_status"] = "reset" if birth else "unanchored"
+        elif seq != expected:
+            self.sequence_discontinuities += 1
+            node["sequence_discontinuities"] += 1
+            node["sequence_status"] = "discontinuity"
+            node["last_sequence_issue"] = {
+                "reason": "repeated_sequence" if seq == previous else "unexpected_sequence",
+                "expected": expected,
+                "received": seq,
+            }
+        else:
+            node["sequence_status"] = "in_order"
+        # Keep arrival order. Do not guess whether a differing sequence was lost,
+        # delayed or reordered, or silently discard the received metric values.
+        node["last_seq"] = seq
 
     def _bound_node(self, node_key: tuple[str, str]) -> bool:
         """Account the full node and its alias tables after every mutation; lock held."""
@@ -366,9 +417,15 @@ class SparkplugRegistry:
                 "evicted_nodes": self.evicted_nodes,
                 "rejected_payloads": self.rejected_payloads,
                 "connection_gaps": self.connection_gaps,
+                "sequence_discontinuities": self.sequence_discontinuities,
+                "invalid_sequences": self.invalid_sequences,
                 "scope": "observed_messages_since_start",
                 "complete": not (
-                    self.evicted_nodes or self.rejected_payloads or self.connection_gaps
+                    self.evicted_nodes
+                    or self.rejected_payloads
+                    or self.connection_gaps
+                    or self.sequence_discontinuities
+                    or self.invalid_sequences
                 ),
             }
 
@@ -399,6 +456,11 @@ class SparkplugRegistry:
 
 def _bd_seq(decoded: dict[str, Any]) -> int | None:
     for metric in decoded["metrics"]:
-        if metric["name"] == sparkplug.BD_SEQ_METRIC and isinstance(metric["value"], int):
+        if (
+            metric["name"] == sparkplug.BD_SEQ_METRIC
+            and isinstance(metric["value"], int)
+            and not isinstance(metric["value"], bool)
+            and 0 <= metric["value"] <= 255
+        ):
             return metric["value"]
     return None
