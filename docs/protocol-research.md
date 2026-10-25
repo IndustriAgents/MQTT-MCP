@@ -45,6 +45,10 @@ evictions, rejected payloads and connection gaps. `complete` is scoped to
 `observed_messages_since_start`: it never proves complete broker discovery, and
 becomes false after known observation loss. The budgets bound retained application
 content, not Paho's initial packet allocation or total Python heap overhead.
+Caller-created active subscriptions and this publisher's device-birth records
+also remain without a total count/byte cap; adding refusal-before-send admission
+for those active states is separate remaining work. They are not evicted by the
+receive-state budgets.
 
 ## Policy and migration
 
