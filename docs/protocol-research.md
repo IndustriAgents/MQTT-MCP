@@ -45,10 +45,29 @@ evictions, rejected payloads and connection gaps. `complete` is scoped to
 `observed_messages_since_start`: it never proves complete broker discovery, and
 becomes false after known observation loss. The budgets bound retained application
 content, not Paho's initial packet allocation or total Python heap overhead.
-Caller-created active subscriptions and this publisher's device-birth records
-also remain without a total count/byte cap; adding refusal-before-send admission
-for those active states is separate remaining work. They are not evicted by the
-receive-state budgets.
+Caller-created subscriptions separately share a 256-entry / 256 KiB encoded
+state budget across confirmed, pending and uncertain topic filters. Publisher
+devices have a 256-entry / 64 KiB encoded state budget. These charge JSON-encoded
+identity plus retained QoS/sequence state (maximum sequence representation), not
+Python heap overhead. Diagnostics expose limits, reservations and uncertain IDs.
+
+Admission occurs under the native callback lock before SUBSCRIBE and under the
+existing Sparkplug lock before DBIRTH. Reconnect restoration reuses already
+admitted confirmed subscriptions; it cannot add capacity or replay uncertain
+mutations. Duplicate operations on a pending filter are refused. Known failures
+release reservations. Cancellation or a lost acknowledgement releases waiter
+objects but preserves a bounded uncertainty record when dispatch may have occurred.
+Late subscription ACKs cannot promote expired calls to confirmed state.
+Explicit unsubscribe can clear an uncertain topic; explicit device death or node
+rebirth can resolve an uncertain DBIRTH. New subscribe/birth attempts for those
+uncertain identities are refused. Clean-session disconnect drops unconfirmed
+subscriptions with an observable loss counter and clears publisher session state.
+Failed restores also count as loss. No active state is silently evicted to make
+room, and admission refusal uses `resource_limit` with `outcome:not_sent`.
+
+`test_active_state_limits.py` covers concurrent admission, encoded Unicode sizes,
+known failures, lost acknowledgements, cancellation, late callbacks, explicit
+cleanup, restore admission, and generation-fenced birth commits.
 
 ## Policy and migration
 

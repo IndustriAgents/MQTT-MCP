@@ -5,7 +5,7 @@
   "tools": [
     {
       "name": "publish_sparkplug",
-      "description": "WRITE: publish a Sparkplug B message. Set message_type and give only the arguments of that mode.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAs this server's own edge node (SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID, see get_broker_info; never the ID of a real edge node):\n- NBIRTH (metrics?): make this server an edge node and publish its birth. The first NBIRTH reconnects with an NDEATH Last Will carrying a new bdSeq, so the broker announces the node's death if the server disappears. bdSeq and 'Node Control/Rebirth' are added for you; seq is 0. Publishing NBIRTH again is a rebirth: devices must then be born again. After an unexpected disconnect the node is dead and needs a new NBIRTH.\n- NDEATH: take the node offline (QoS 1, confirmed by the broker). Its devices count as dead; the next NBIRTH uses a new bdSeq.\n- DBIRTH (device_id, metrics): birth of a device of this node. Needs a born node.\n- DDEATH (device_id): death of a device born with DBIRTH.\n- NDATA (metrics): new values of the node's metrics. Needs a born node.\n- DDATA (device_id, metrics): new values of a device born with DBIRTH.\nThese use the node's next seq. The server does not act on commands sent to its own node.\n\nCommands to other edge nodes, which can change real equipment:\n- NCMD (edge_node_id, metrics, group_id?): e.g. {\"name\": \"Node Control/Rebirth\", \"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n- DCMD (edge_node_id, device_id, metrics, group_id?): the edge node applies the metrics to the device.\n\nSent at most once. success:true (meta.outcome 'written') means the message was written to the network (QoS 0, as the specification requires; NDEATH: acknowledged by the broker). For a command that does not mean the node applied it: read its next NDATA or DDATA with read_messages to confirm. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have gone out: the server never sends it again, so check before retrying.\n\nMetrics are a list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string), case-insensitive, so the datatype names list_sparkplug_nodes shows (Int32, Double, ...) work too. The value must match the type and fit its range; null sends a null metric. An invalid metric is refused before anything is sent. For int64, uint64 and datetime values, plain decimal strings are accepted to preserve precision through JSON clients.",
+      "description": "WRITE: publish a Sparkplug B message. Set message_type and give only the arguments of that mode.\n\nRequires MQTT_WRITES_ENABLED=true; otherwise returns success:false (meta.code 'writes_disabled') and publishes nothing.\n\nAs this server's own edge node (SPARKPLUG_GROUP_ID/SPARKPLUG_EDGE_NODE_ID, see get_broker_info; never the ID of a real edge node):\n- NBIRTH (metrics?): make this server an edge node and publish its birth. The first NBIRTH reconnects with an NDEATH Last Will carrying a new bdSeq, so the broker announces the node's death if the server disappears. bdSeq and 'Node Control/Rebirth' are added for you; seq is 0. Publishing NBIRTH again is a rebirth: devices must then be born again. After an unexpected disconnect the node is dead and needs a new NBIRTH.\n- NDEATH: take the node offline (QoS 1, confirmed by the broker). Its devices count as dead; the next NBIRTH uses a new bdSeq.\n- DBIRTH (device_id, metrics): birth of a device of this node. Needs a born node.\n- DDEATH (device_id): death of a device born with DBIRTH.\n- NDATA (metrics): new values of the node's metrics. Needs a born node.\n- DDATA (device_id, metrics): new values of a device born with DBIRTH.\nThese use the node's next seq. The server does not act on commands sent to its own node.\n\nCommands to other edge nodes, which can change real equipment:\n- NCMD (edge_node_id, metrics, group_id?): e.g. {\"name\": \"Node Control/Rebirth\", \"value\": true, \"type\": \"boolean\"} asks a node to republish its births.\n- DCMD (edge_node_id, device_id, metrics, group_id?): the edge node applies the metrics to the device.\n\nSent at most once. success:true (meta.outcome 'written') means the message was written to the network (QoS 0, as the specification requires; NDEATH: acknowledged by the broker). For a command that does not mean the node applied it: read its next NDATA or DDATA with read_messages to confirm. meta.outcome 'not_sent' means nothing left the server. 'unknown' (meta.code 'outcome_unknown') means it may have gone out: the server never sends it again, so check before retrying.\n\nMetrics are a list of {\"name\": str, \"value\": ..., \"type\": str} objects. type is one of int8, int16, int32 (or int), int64 (or long), uint8, uint16, uint32, uint64, float, double, boolean (or bool), string, text, uuid, datetime (milliseconds since the Unix epoch) or bytes (value as a hex string), case-insensitive, so the datatype names list_sparkplug_nodes shows (Int32, Double, ...) work too. The value must match the type and fit its range; null sends a null metric. An invalid metric is refused before anything is sent. For int64, uint64 and datetime values, plain decimal strings are accepted to preserve precision through JSON clients. Publisher devices share limits of 256 entries and 64 KiB encoded retained state, including pending and uncertain births. An uncertain birth must be resolved by explicit device death or node rebirth before retrying.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -539,7 +539,7 @@
     },
     {
       "name": "get_broker_info",
-      "description": "Report this server's connection to the MQTT broker and its configuration. Call it first: it says whether the broker is reachable (connected, last_error), whether writes are allowed (writes_enabled: while it is false every publish is refused), which subscriptions are held, how many received messages are buffered, and the state of this server's own Sparkplug B edge node. Does not contact the broker, so it answers even while the broker is down.",
+      "description": "Report this server's connection to the MQTT broker and its configuration. Call it first: it says whether the broker is reachable (connected, last_error), whether writes are allowed (writes_enabled: while it is false every publish is refused), which subscriptions are held, how many received messages are buffered, and the state of this server's own Sparkplug B edge node. Does not contact the broker, so it answers even while the broker is down. Includes count/encoded-byte budgets and bounded uncertainty for active subscriptions and publisher devices.",
       "inputSchema": {
         "type": "object",
         "properties": {},
@@ -744,6 +744,89 @@
                   "registry": {
                     "type": "object",
                     "description": "Observed Sparkplug cache and loss counters, not a complete broker inventory."
+                  },
+                  "subscription_state": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "encoded_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pending": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "lost_subscriptions": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "uncertain_topics": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "encoded_bytes",
+                      "max_count",
+                      "max_bytes",
+                      "pending",
+                      "lost_subscriptions",
+                      "uncertain_topics"
+                    ]
+                  },
+                  "publisher_devices": {
+                    "type": "object",
+                    "properties": {
+                      "count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "encoded_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "max_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "pending": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "uncertain_devices": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "count",
+                      "encoded_bytes",
+                      "max_count",
+                      "max_bytes",
+                      "pending",
+                      "uncertain_devices"
+                    ]
                   }
                 },
                 "required": [
@@ -759,7 +842,9 @@
                   "buffered_messages",
                   "sparkplug",
                   "capabilities",
-                  "registry"
+                  "registry",
+                  "subscription_state",
+                  "publisher_devices"
                 ]
               }
             ]
@@ -843,7 +928,7 @@
     },
     {
       "name": "subscribe_topic",
-      "description": "Subscribe this server to an MQTT topic filter, so that matching messages are kept for read_messages. MQTT is publish/subscribe: nothing can be read from a topic until this server is subscribed to it, and only messages that arrive afterwards are seen, plus the topic's retained message, which the broker sends at once. Subscribe to 'spBv1.0/#' to discover Sparkplug B edge nodes with list_sparkplug_nodes. Succeeds only once the broker acknowledges (SUBACK); data.granted_qos is the QoS it granted. Subscriptions are restored automatically after a reconnect. Changes broker/client subscription state; special broker filters can affect other consumers. Explicit read_only policy denies this operation.",
+      "description": "Subscribe this server to an MQTT topic filter, so that matching messages are kept for read_messages. MQTT is publish/subscribe: nothing can be read from a topic until this server is subscribed to it, and only messages that arrive afterwards are seen, plus the topic's retained message, which the broker sends at once. Subscribe to 'spBv1.0/#' to discover Sparkplug B edge nodes with list_sparkplug_nodes. Succeeds only once the broker acknowledges (SUBACK); data.granted_qos is the QoS it granted. Subscriptions are restored automatically after a reconnect. Changes broker/client subscription state; special broker filters can affect other consumers. Explicit read_only policy denies this operation. Active, pending and uncertain topic filters share limits of 256 entries and 256 KiB encoded state. Uncertain mutations are never automatically replayed; inspect get_broker_info.subscription_state.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -991,7 +1076,7 @@
     },
     {
       "name": "unsubscribe_topic",
-      "description": "Remove one of this server's subscriptions, named exactly as list_subscriptions shows it. Messages already buffered stay readable with read_messages. Fails with meta.code 'not_subscribed' if this server holds no subscription with that exact filter. Changes broker/client subscription state and is denied by explicit read_only policy.",
+      "description": "Remove one of this server's subscriptions, named exactly as list_subscriptions shows it. Messages already buffered stay readable with read_messages. Fails with meta.code 'not_subscribed' if this server holds no subscription with that exact filter. Changes broker/client subscription state and is denied by explicit read_only policy. An explicitly named uncertain subscription may also be removed; success releases its capacity.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -2860,6 +2945,89 @@
         "registry": {
           "type": "object",
           "description": "Observed Sparkplug cache and loss counters, not a complete broker inventory."
+        },
+        "subscription_state": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "encoded_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "lost_subscriptions": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uncertain_topics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "count",
+            "encoded_bytes",
+            "max_count",
+            "max_bytes",
+            "pending",
+            "lost_subscriptions",
+            "uncertain_topics"
+          ]
+        },
+        "publisher_devices": {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "encoded_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "pending": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uncertain_devices": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "count",
+            "encoded_bytes",
+            "max_count",
+            "max_bytes",
+            "pending",
+            "uncertain_devices"
+          ]
         }
       },
       "required": [
@@ -2875,7 +3043,9 @@
         "buffered_messages",
         "sparkplug",
         "capabilities",
-        "registry"
+        "registry",
+        "subscription_state",
+        "publisher_devices"
       ]
     },
     "subscription": {
@@ -3466,7 +3636,7 @@
     "invalid_arguments": "An argument is missing, has the wrong type or is out of range; error names it. Nothing was sent. Fix the arguments and call again.",
     "writes_disabled": "This server is read-only: MQTT_WRITES_ENABLED is not true. Nothing was sent. Only whoever runs the server can enable writes, so do not retry.",
     "policy_denied": "The deployment policy (MQTT_POLICY_FILE) does not allow this tool or operation. Nothing was sent.",
-    "resource_limit": "Too many calls are in flight, or the request is too large. Nothing was sent. Retry once running calls finish, or send less.",
+    "resource_limit": "Admission, request-size, active subscription or publisher-device count/encoded-byte capacity is exhausted, or the same subscription mutation is pending/uncertain. Nothing was sent. Inspect diagnostics and explicitly remove unused/uncertain state; do not blindly retry.",
     "audit_unavailable": "The audit log (audit_path) could not record the write's intent, so the write was refused. Nothing was sent.",
     "endpoint_offline": "The broker could not be reached, or the connection dropped before anything was written. Nothing was sent; the server keeps reconnecting in the background. Check get_broker_info and call again once connected is true.",
     "deadline_exceeded": "The call ran out of time (MQTT_TOOL_TIMEOUT) before anything was sent. Nothing was sent, and it will not be sent later.",

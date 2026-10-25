@@ -27,6 +27,8 @@ def manager():
 @pytest.mark.parametrize("kind", ["subscribe", "unsubscribe"])
 async def test_cancelled_ack_wait_releases_pending_future(kind):
     value = manager()
+    if kind == "unsubscribe":
+        value.subscriptions["test/#"] = 0
     sent = asyncio.Event()
 
     def native_call():
@@ -40,6 +42,7 @@ async def test_cancelled_ack_wait_releases_pending_future(kind):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert value._pending == {}
+    assert value.subscription_state()["uncertain_topics"] == ["test/#"]
 
 
 @pytest.mark.parametrize("kind", ["subscribe", "unsubscribe"])
